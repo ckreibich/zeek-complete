@@ -1,0 +1,347 @@
+#! /usr/bin/env python3
+"""A command-line argument completer for use with Bash completion. See the
+accompanying "zeek" shell script, and install it in any of your system's
+bash_completion.d directories."""
+
+# For easier forward references in type annotations
+from __future__ import annotations
+
+import enum
+import os
+import re
+import subprocess
+import sys
+import traceback
+from typing import Any
+
+try:
+    # For a portable way to get network interfaces:
+    import psutil  # type: ignore
+except ImportError:
+    pass
+
+
+class CompType(enum.Enum):
+    """An enum representation of the numerical completion type values passed in
+    via the COMP_TYPE environment variable."""
+
+    # Funny numbers, since they're supposed to render as individual characters
+    # as well -- see the Bash manpage for details.
+    UNKNOWN = 0
+    NORMAL = 9
+    SUCCESSIVE = 63
+    PARTIAL_WORD = 33
+    MODDED_WORD = 64
+    MENU = 37
+
+
+class LineContext:
+    """This provides the context we're in on the current line. The command, the
+    current word (up to point) and a possible previous word are passed as
+    arguments if we're invoked via "complete -C". We also grab the whole line,
+    the point offset, and the completion type from environment variablesa
+    current line and point on it, plus a completion type."""
+
+    def __init__(self, cmd: str, curr_word: str, prev_word: str):
+        self.cmd = cmd
+        self.curr_word = curr_word
+        self.prev_word = prev_word
+
+        self.line = os.getenv("COMP_LINE", "")
+        self.typ = CompType(int(os.getenv("COMP_TYPE", "0")))
+
+
+class ZeekArg:
+    """A command-line argument to Zeek: anything starting with "-"."""
+
+    def __init__(
+        self,
+        shortarg: str,
+        longarg: str = "",
+        param: str = "",
+        param_optional: bool = False,
+    ):
+        self.shortarg = shortarg
+        self.longarg = longarg
+        self.param = param
+        self.param_optional = param_optional
+
+    def __str__(self) -> str:
+        if self.shortarg:
+            res = self.shortarg + "|" + self.longarg
+        else:
+            res = self.longarg
+        if self.param:
+            res = f"{res} {'<' if self.param_optional else ''}{self.param}{'>' if self.param_optional else ''}"
+        return res
+
+    def match(self, prefix: str) -> MatchedArg | None:
+        """Returns a MatchedArg for this argument if the given prefix fits
+        either the short argument or the long one. Otherwise returns None.
+        """
+        if self.shortarg.startswith(prefix):
+            return MatchedArg(self, is_short=True)
+        if prefix.startswith("--") and self.longarg.startswith(prefix):
+            return MatchedArg(self, is_short=False)
+        return None
+
+    def equal(self, arg: str) -> MatchedArg | None:
+        """Returns a MatchedArg for this argument if the given argument name
+        fits either the short argument or the long one exactly. Otherwise
+        returns None.
+        """
+        if self.shortarg == arg:
+            return MatchedArg(self, is_short=True)
+        if arg.startswith("--") and self.longarg == arg:
+            return MatchedArg(self, is_short=False)
+        return None
+
+
+class MatchedArg:
+    """An argument selected via a prefix match, either on the short or the long
+    version of the argument."""
+
+    def __init__(self, arg: ZeekArg, is_short: bool):
+        self.arg = arg
+        self.is_short = is_short
+
+    def __str__(self) -> str:
+        if self.is_short:
+            return self.arg.shortarg
+        return self.arg.longarg
+
+
+class ZeekArgs:
+    """Parses the command-line options as rendered by "zeek -h"."""
+
+    def __init__(self, cmd: str):
+        self.cmd: str = cmd
+        self.args: dict[str, ZeekArg] = {}
+
+        # The effective ZEEKPATH. We use the environment when available,
+        # otherwise parse from Zeek's help output with the regex below.
+        self.zeekpath: str = os.getenv("ZEEKPATH", "")
+        self.zeekpath_re = re.compile(r"\$ZEEKPATH *\|.+\((.+)\)")
+
+    def parse(self) -> bool:
+        """Grabs the output of "zeek --help" via the given command, and parses
+        the command-line args in to self.args.
+        """
+        try:
+            res = subprocess.run(
+                (self.cmd, "--help"), capture_output=True, text=True, timeout=1
+            )
+        except subprocess.TimeoutExpired:
+            return False
+
+        if res.returncode != 0:
+            return False
+
+        lines = [line.strip() for line in res.stdout.splitlines()]
+        if not lines or not lines[0].lower().startswith("zeek version"):
+            return False
+
+        for line in lines:
+            # Parse the built-in ZEEKPATH if the environment doesn't override.
+            if not self.zeekpath and line.startswith("$ZEEKPATH"):
+                mob = self.zeekpath_re.match(line)
+                if mob is not None and len(mob.groups()) == 1:
+                    self.zeekpath = mob.group(1)
+                    continue
+
+            # For argument parsing, grab lines starting with a command-line
+            # argument, and split those lines along "|". We should have at least
+            # two resulting strings; three if the argument has short and long
+            # forms.
+            if not line.strip().startswith("-"):
+                continue
+            parts = line.strip().split("|")
+            if len(parts) < 2:
+                continue
+
+            shortarg = ""
+            param = ""
+            param_optional = False
+
+            if parts[0].startswith("--"):
+                # It's a long-form only argument
+                longarg = parts[0].strip()
+            else:
+                shortarg, longarg = parts[0].strip(), parts[1].strip()
+
+            if "[" in longarg:
+                param_optional = True
+
+            # Go from e.g "--pseudo-realtime[=<speedup>]" to
+            # "--pseudo-realtime=speedup", to be broken apart below.
+            longarg = (
+                longarg.replace("[", "")
+                .replace("]", "")
+                .replace("<", "")
+                .replace(">", "")
+            )
+            # Some long forms use a space separator in the help output, others an equals sign:
+            longparts = [p.strip() for p in re.split(r"[ =]", longarg)]
+
+            if len(longparts) > 1:
+                param = longparts[1]  # Things like "file", "level", or "interface"
+
+            self.args[longparts[0]] = ZeekArg(
+                shortarg, longparts[0], param, param_optional
+            )
+
+        return True
+
+    def find_by_match(self, prefix: str) -> list[MatchedArg]:
+        """Returns a list of matching arguments based on prefix-matching the
+        given prefix against the arguments.
+        """
+        res: list[MatchedArg] = []
+        for zarg in self.args.values():
+            match: MatchedArg | None = zarg.match(prefix)
+            if match is not None:
+                res.append(match)
+        return res
+
+    def find(self, arg: str) -> list[MatchedArg]:
+        """Returns a list of matching arguments based on exact match of the
+        given argument name against short or long versions.
+        """
+        res: list[MatchedArg] = []
+        for zarg in self.args.values():
+            match: MatchedArg | None = zarg.equal(arg)
+            if match is not None:
+                res.append(match)
+        return res
+
+
+def prefix_filter(lst: list[str], prefix: str) -> list[str]:
+    """Filters the given list down to items starting with the given prefix."""
+    return [item for item in lst if str(item).startswith(prefix)]
+
+
+def print_list(lst: list[Any]) -> bool:
+    """Given a nonempty list of items, prints each and returns True. Otherwise
+    returns False.
+    """
+    if lst:
+        for item in lst:
+            print(item)
+        return True
+    return False
+
+
+def get_sys_interfaces() -> list[str]:
+    """Returns list of network interfaces on this machine.
+
+    This works only of the psutil module is available, otherwise this returns an
+    empty list.
+    """
+    if "psutil" in sys.modules:
+        return psutil.net_if_addrs().keys()  # type: ignore
+    return []
+
+
+def get_zeek_debugstreams(cmd: str) -> list[str]:
+    """Returns list of the possible options to -B|--debug."""
+    try:
+        res = subprocess.run(
+            (cmd, "-B", "help"), capture_output=True, text=True, timeout=1
+        )
+    except subprocess.TimeoutExpired:
+        return []
+
+    if res.returncode != 0:
+        return []
+
+    streams: set[str] = set()
+
+    for line in res.stderr.splitlines():
+        if not line.startswith(" "):
+            continue
+        stream = line.strip().split(maxsplit=1)[0]
+        if not stream.startswith("plugin-"):
+            streams.add(stream)
+
+    streams.add("help")  # "help" itself is not shown in the "-B help" output.
+
+    return list(streams)
+
+
+def get_zeek_optimizations(cmd: str) -> list[str]:
+    """Returns list of the possible options to -O|--optimize."""
+    try:
+        res = subprocess.run(
+            (cmd, "-O", "help"), capture_output=True, text=True, timeout=1
+        )
+    except subprocess.TimeoutExpired:
+        return []
+
+    if res.returncode != 0:
+        return []
+
+    opts: list[str] = []
+
+    for line in res.stdout.splitlines():
+        if not line.startswith("    "):
+            continue
+        opts.append(line.strip().split(maxsplit=1)[0])
+
+    return opts
+
+
+def main() -> int:
+    cmd, curr_word, prev_word = (sys.argv + ["", "", ""])[1:4]
+    if not cmd:
+        # We might not have a current word or previous word, but if we don't
+        # have a command, we're likely not invoked via "complete -C". Exit
+        # without error; that way a plain invocation can be used to test whether
+        # the script is available.
+        return 0
+
+    ctx = LineContext(cmd, curr_word, prev_word)
+
+    zargs = ZeekArgs(ctx.cmd)
+    if not zargs.parse():
+        return 1
+
+    # Figure out what we should offer for completion.
+    if ctx.curr_word.startswith("-"):
+        # Normal completion of an argument in progress:
+        matches = zargs.find_by_match(ctx.curr_word)
+        if print_list(matches):
+            return 0
+
+    if ctx.prev_word.startswith("-") and (
+        not ctx.curr_word or not ctx.curr_word.startswith("-")
+    ):
+        # The previous word is an argument, and the current isn't.  This might
+        # be a case for expanding the option to the argument (e.g. a network
+        # interface to -i). For that to work, we have to have exactly one match.
+        matches = zargs.find(ctx.prev_word)
+        if len(matches) == 1 and matches[0].arg.param:
+            arg = matches[0].arg
+            if arg.shortarg == "-i":
+                ifaces = prefix_filter(get_sys_interfaces(), ctx.curr_word)
+                if print_list(ifaces):
+                    return 0
+            elif arg.shortarg == "-B":
+                streams = prefix_filter(get_zeek_debugstreams(zargs.cmd), ctx.curr_word)
+                if print_list(streams):
+                    return 0
+            elif arg.shortarg == "-O":
+                opts = prefix_filter(get_zeek_optimizations(zargs.cmd), ctx.curr_word)
+                if print_list(opts):
+                    return 0
+
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:
+        with open("zeek-completer.log", "w") as hdl:
+            print("zeek-complete failed. Here is the traceback:", file=hdl)
+            traceback.print_exc(file=hdl)
+        sys.exit(1)
