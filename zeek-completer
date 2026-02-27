@@ -361,10 +361,10 @@ def print_list(lst: list[Any], suffix: str = " ") -> bool:
 def main() -> int:
     cmd, curr_word, prev_word = (sys.argv + ["", "", ""])[1:4]
     if not cmd:
-        # We might not have a current word or previous word, but if we don't
-        # have a command, we're likely not invoked via "complete -C". Exit
-        # without error; that way a plain invocation can be used to test whether
-        # the script is available.
+        # We may not have a current or previous word, but if we don't have a
+        # command, we're likely not invoked via "complete -C". Exit without
+        # error; that way an argument-less invocation can be used to test
+        # whether the script is available.
         return 0
 
     ctx = LineContext(cmd, curr_word, prev_word)
@@ -407,7 +407,11 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception:
-        with open("zeek-completer.log", "w") as hdl:
-            print("zeek-complete failed. Here is the traceback:", file=hdl)
-            traceback.print_exc(file=hdl)
-        sys.exit(1)
+        # Sweep this under the rug unless the user has asked to see backtraces.
+        if os.getenv("ZEEK_COMPLETER_EXCEPTIONS", ""):
+            print("\n*** zeek-completer failed unexpectedly:", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+    except KeyboardInterrupt:
+        # Just error out if the user ctrl-c's while we run things.
+        pass
+    sys.exit(1)
