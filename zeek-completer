@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import enum
 import os
+import pathlib
 import re
 import subprocess
 import sys
 import traceback
+
+from itertools import islice
 from typing import Any
 
 try:
@@ -52,7 +55,8 @@ class LineContext:
 
 
 class ZeekArg:
-    """A command-line argument to Zeek: anything starting with "-"."""
+    """A command-line argument to Zeek, with optional additional parameters
+    (such as a network interface to -i, or a debug stream to -B."""
 
     def __init__(
         self,
@@ -214,80 +218,144 @@ class ZeekArgs:
                 res.append(match)
         return res
 
+    def find_arg_param(self, arg: str, prefix: str) -> list[str]:
+        """Returns possible parameters to a given argument, such as network
+        interfaces for "-i". arg is that previous argument, and prefix is any
+        beginning parameter string.
+        """
+        matches = self.find(arg)
+
+        if len(matches) == 1 and matches[0].arg.param:
+            zarg = matches[0].arg
+            if zarg.shortarg == "-i":
+                return prefix_filter(self._get_sys_interfaces(), prefix)
+            elif zarg.shortarg == "-B":
+                return prefix_filter(self._get_zeek_debugstreams(), prefix)
+            elif zarg.shortarg == "-O":
+                return prefix_filter(self._get_zeek_optimizations(), prefix)
+
+        return []
+
+    def _get_sys_interfaces(self) -> list[str]:
+        """Returns list of network interfaces on this machine.
+
+        This works only of the psutil module is available, otherwise this returns an
+        empty list.
+        """
+        if "psutil" in sys.modules:
+            return psutil.net_if_addrs().keys()  # type: ignore
+        return []
+
+    def _get_zeek_debugstreams(self) -> list[str]:
+        """Returns list of the possible options to -B|--debug."""
+        try:
+            res = subprocess.run(
+                (self.cmd, "-B", "help"), capture_output=True, text=True, timeout=1
+            )
+        except subprocess.TimeoutExpired:
+            return []
+
+        if res.returncode != 0:
+            return []
+
+        streams: set[str] = set()
+
+        for line in res.stderr.splitlines():
+            if not line.startswith(" "):
+                continue
+            stream = line.strip().split(maxsplit=1)[0]
+            if not stream.startswith("plugin-"):
+                streams.add(stream)
+
+        streams.add("help")  # "help" itself is not shown in the "-B help" output.
+
+        return list(streams)
+
+    def _get_zeek_optimizations(self) -> list[str]:
+        """Returns list of the possible options to -O|--optimize."""
+        try:
+            res = subprocess.run(
+                (self.cmd, "-O", "help"), capture_output=True, text=True, timeout=1
+            )
+        except subprocess.TimeoutExpired:
+            return []
+
+        if res.returncode != 0:
+            return []
+
+        opts: list[str] = []
+
+        for line in res.stdout.splitlines():
+            if not line.startswith("    "):
+                continue
+            opts.append(line.strip().split(maxsplit=1)[0])
+
+        return opts
+
+
+class ZeekScriptTree:
+    """A Zeek script tree is any directory from which we try to match Zeek (or
+    JavaScript, if available) scripts. Normally these are the directories in
+    ZEEKPATH."""
+
+    SUFFIXES = [".zeek", ".js"]
+
+    def __init__(self, path: str, limit: int = 100):
+        """Constructor. The path argument is the directory at which we root the
+        tree, and limit is the maximum number of files to yield.
+        """
+        self.path = pathlib.Path(path)
+        self.limit = limit
+
+    def match(self, prefix: str) -> list[str]:
+        res: list[str] = []
+        for p in islice(self.path.glob(prefix + "*"), self.limit):
+            # The path relative to the root of the tree:
+            rpath = p.relative_to(self.path)
+            if p.is_dir():
+                # If it's a directory, we end with the slash and no space. It's
+                # relatively likely the user wants to continue to expand.
+                res.append(f"{rpath}{os.sep}")
+            elif p.suffix in self.SUFFIXES:
+                # If it's a file, we only consider Zeek-relevant script
+                # files. Expansion is for sure complete and we can add a space.
+                res.append(str(rpath) + " ")
+        return res
+
+
+class ZeekScriptCompleter:
+    """This attempts path expansion for any prefixes that we cannot otherwise
+    complete, based on the contents of ZEEPATH."""
+
+    def __init__(self, zeekpath: str):
+        self.zeekpath = zeekpath
+        self.roots = [ZeekScriptTree(path) for path in zeekpath.split(os.pathsep)]
+
+    def match(self, prefix: str) -> list[str]:
+        res: list[str] = []
+        # This considers all possible roots, which is likely more helpful to the
+        # user but might also lead to a lot of completions.
+        for root in self.roots:
+            res.extend(root.match(prefix))
+        return res
+
 
 def prefix_filter(lst: list[str], prefix: str) -> list[str]:
     """Filters the given list down to items starting with the given prefix."""
     return [item for item in lst if str(item).startswith(prefix)]
 
 
-def print_list(lst: list[Any]) -> bool:
-    """Given a nonempty list of items, prints each and returns True. Otherwise
-    returns False.
+def print_list(lst: list[Any], suffix: str = " ") -> bool:
+    """Given a nonempty list of items, prints each and returns True; otherwise,
+    returns False. The suffix is included on each item and meant to control what
+    happens at the end of a completion: for a command line option you usually
+    want automatic space separation, while for paths you don't.
     """
     if lst:
         for item in lst:
-            print(item)
+            print(str(item) + suffix)
         return True
     return False
-
-
-def get_sys_interfaces() -> list[str]:
-    """Returns list of network interfaces on this machine.
-
-    This works only of the psutil module is available, otherwise this returns an
-    empty list.
-    """
-    if "psutil" in sys.modules:
-        return psutil.net_if_addrs().keys()  # type: ignore
-    return []
-
-
-def get_zeek_debugstreams(cmd: str) -> list[str]:
-    """Returns list of the possible options to -B|--debug."""
-    try:
-        res = subprocess.run(
-            (cmd, "-B", "help"), capture_output=True, text=True, timeout=1
-        )
-    except subprocess.TimeoutExpired:
-        return []
-
-    if res.returncode != 0:
-        return []
-
-    streams: set[str] = set()
-
-    for line in res.stderr.splitlines():
-        if not line.startswith(" "):
-            continue
-        stream = line.strip().split(maxsplit=1)[0]
-        if not stream.startswith("plugin-"):
-            streams.add(stream)
-
-    streams.add("help")  # "help" itself is not shown in the "-B help" output.
-
-    return list(streams)
-
-
-def get_zeek_optimizations(cmd: str) -> list[str]:
-    """Returns list of the possible options to -O|--optimize."""
-    try:
-        res = subprocess.run(
-            (cmd, "-O", "help"), capture_output=True, text=True, timeout=1
-        )
-    except subprocess.TimeoutExpired:
-        return []
-
-    if res.returncode != 0:
-        return []
-
-    opts: list[str] = []
-
-    for line in res.stdout.splitlines():
-        if not line.startswith("    "):
-            continue
-        opts.append(line.strip().split(maxsplit=1)[0])
-
-    return opts
 
 
 def main() -> int:
@@ -316,23 +384,21 @@ def main() -> int:
         not ctx.curr_word or not ctx.curr_word.startswith("-")
     ):
         # The previous word is an argument, and the current isn't.  This might
-        # be a case for expanding the option to the argument (e.g. a network
-        # interface to -i). For that to work, we have to have exactly one match.
-        matches = zargs.find(ctx.prev_word)
-        if len(matches) == 1 and matches[0].arg.param:
-            arg = matches[0].arg
-            if arg.shortarg == "-i":
-                ifaces = prefix_filter(get_sys_interfaces(), ctx.curr_word)
-                if print_list(ifaces):
-                    return 0
-            elif arg.shortarg == "-B":
-                streams = prefix_filter(get_zeek_debugstreams(zargs.cmd), ctx.curr_word)
-                if print_list(streams):
-                    return 0
-            elif arg.shortarg == "-O":
-                opts = prefix_filter(get_zeek_optimizations(zargs.cmd), ctx.curr_word)
-                if print_list(opts):
-                    return 0
+        # be a case for expanding the parameter to the argument (e.g. a network
+        # interface to -i).
+        params = zargs.find_arg_param(ctx.prev_word, ctx.curr_word)
+        if print_list(params):
+            return 0
+
+    # Try script path completion next if we have anything to go on:
+    if ctx.curr_word and not ctx.curr_word.startswith("-"):
+        zscomp = ZeekScriptCompleter(zargs.zeekpath)
+        scripts = zscomp.match(ctx.curr_word)
+        if print_list(scripts, suffix=""):
+            return 0
+
+    # If we have nothing, our invocation via "complete" should fall back to
+    # regular local path completion.
 
     return 0
 
