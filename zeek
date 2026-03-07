@@ -10,10 +10,10 @@
 #
 # You can also say "source path/to/this/zeek" explicitly.
 #
-# This script requires the separate zeek-completer Python script for all the
+# This script requires the separate zeek-complete Python script for all the
 # heavy lifting. Make sure it's in your PATH.
 
-_zeek_completer()
+_zeek_complete()
 {
     # This is a workaround to make completion work reasonably well in the
     # presence of "=" and ":" characters in the completions, which are normally
@@ -26,12 +26,12 @@ _zeek_completer()
     # COMPREPLY is the interface to the complete command for returning
     # completions. Populate it with the output of our script. We put the COMP_
     # variables in the environment since they're not otherwise available to
-    # zeek-completer.
+    # zeek-complete.
     export COMP_TYPE COMP_LINE COMP_POINT
-    mapfile -t COMPREPLY < <( zeek-completer zeek "$cur" "$prev" )
+    mapfile -t COMPREPLY < <( zeek-complete zeek "$cur" "$prev" )
 
     # Part II of the above workaround:
     _comp_ltrim_colon_completions "$cur"
 }
 
-zeek-completer 2>/dev/null && complete -o nospace -F _zeek_completer zeek
+zeek-complete 2>/dev/null && complete -o nospace -F _zeek_complete zeek

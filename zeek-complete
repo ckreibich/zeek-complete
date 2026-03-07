@@ -534,8 +534,8 @@ if __name__ == "__main__":
         sys.exit(main())
     except Exception:
         # Sweep this under the rug unless the user has asked to see backtraces.
-        if os.getenv("ZEEK_COMPLETER_EXCEPTIONS", ""):
-            print("\n*** zeek-completer failed unexpectedly:", file=sys.stderr)
+        if os.getenv("ZEEK_COMPLETE_EXCEPTIONS", ""):
+            print("\n*** zeek-complete failed unexpectedly:", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
     except KeyboardInterrupt:
         # Just error out if the user ctrl-c's while we run things.
