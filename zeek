@@ -12,9 +12,26 @@
 #
 # This script requires the separate zeek-completer Python script for all the
 # heavy lifting. Make sure it's in your PATH.
-#
-# The default option is to get normal completion if the script cannot come up
-# with one, and nospace indicates that the completion script takes care of any
-# whitespace suffixes itself.
-#
-zeek-completer 2>/dev/null && complete -o default -o nospace -C zeek-completer zeek
+
+_zeek_completer()
+{
+    # This is a workaround to make completion work reasonably well in the
+    # presence of "=" and ":" characters in the completions, which are normally
+    # considered part of word breaks via the COMP_WORDBREAKS variable.  See
+    # https://stackoverflow.com/a/12495480 as well as the contents of
+    # /usr/share/bash-completion/bash_completion or similars.
+    local cur prev
+    _comp_get_words -n := cur prev
+
+    # COMPREPLY is the interface to the complete command for returning
+    # completions. Populate it with the output of our script. We put the COMP_
+    # variables in the environment since they're not otherwise available to
+    # zeek-completer.
+    export COMP_TYPE COMP_LINE COMP_POINT
+    mapfile -t COMPREPLY < <( zeek-completer zeek "$cur" "$prev" )
+
+    # Part II of the above workaround:
+    _comp_ltrim_colon_completions "$cur"
+}
+
+zeek-completer 2>/dev/null && complete -o nospace -F _zeek_completer zeek

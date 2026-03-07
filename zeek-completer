@@ -7,11 +7,14 @@ bash_completion.d directories."""
 from __future__ import annotations
 
 import enum
+import glob
 import os
 import pathlib
 import re
+import shlex
 import subprocess
 import sys
+import tempfile
 import traceback
 
 from itertools import islice
@@ -28,30 +31,39 @@ class CompType(enum.Enum):
     """An enum representation of the numerical completion type values passed in
     via the COMP_TYPE environment variable."""
 
-    # Funny numbers, since they're supposed to render as individual characters
-    # as well -- see the Bash manpage for details.
+    # Funny numbers. They're supposed to render as individual characters
+    # as well -- see the Bash manpage for details. "Normal" and "successive"
+    # completions come up regularly. I haven't figuredo out the others.
     UNKNOWN = 0
-    NORMAL = 9
-    SUCCESSIVE = 63
-    PARTIAL_WORD = 33
-    MODDED_WORD = 64
-    MENU = 37
+    NORMAL = 9  # tab
+    SUCCESSIVE = 63  # ? (tab tab)
+    PARTIAL_WORD = 33  # !
+    MODDED_WORD = 64  # @
+    MENU = 37  # %
 
 
 class LineContext:
     """This provides the context we're in on the current line. The command, the
-    current word (up to point) and a possible previous word are passed as
-    arguments if we're invoked via "complete -C". We also grab the whole line,
-    the point offset, and the completion type from environment variablesa
-    current line and point on it, plus a completion type."""
+    current word (up to the point -- for example, if the last word is "foo" and
+    the cursor is at "f<cursor>oo", the current word is "f") and a possible
+    previous word are passed as arguments if we're invoked via "complete -C". We
+    also grab the whole line, the point offset, and the completion type from
+    environment variables.
+    """
 
     def __init__(self, cmd: str, curr_word: str, prev_word: str):
         self.cmd = cmd
         self.curr_word = curr_word
         self.prev_word = prev_word
 
+        self.comp_type = CompType(int(os.getenv("COMP_TYPE", "0")))
         self.line = os.getenv("COMP_LINE", "")
-        self.typ = CompType(int(os.getenv("COMP_TYPE", "0")))
+        self.point = os.getenv("COMP_POINT", "")
+
+        # All words on the current line, including the command, but keeping
+        # quoted content intact ('foo "bar baz"' turns into two words, "foo" and
+        # "bar baz"):
+        self.line_words: list[str] = shlex.split(self.line)
 
 
 class ZeekArg:
@@ -120,7 +132,7 @@ class ZeekArgs:
 
     def __init__(self, cmd: str):
         self.cmd: str = cmd
-        self.args: dict[str, ZeekArg] = {}
+        self.args: dict[str, ZeekArg] = {}  # indexed by long-form arg
 
         # The effective ZEEKPATH. We use the environment when available,
         # otherwise parse from Zeek's help output with the regex below.
@@ -293,51 +305,155 @@ class ZeekArgs:
         return opts
 
 
-class ZeekScriptTree:
-    """A Zeek script tree is any directory from which we try to match Zeek (or
-    JavaScript, if available) scripts. Normally these are the directories in
-    ZEEKPATH."""
+class ScriptTree:
+    """Base class for Zeek script path completion. This works just like normal
+    path expansion in your shell, based on a local prefix, and completing the
+    exact prefix string you enter.
+    """
 
+    # If you want .bro, you're old enough to be used to typing a lot. ;-)
     SUFFIXES = [".zeek", ".js"]
+
+    def __init__(self, limit: int = 100):
+        self.limit = limit
+
+    def match(self, prefix: str) -> list[str]:
+        res: list[str] = []
+        for path in islice(glob.glob(prefix + "*"), self.limit):
+            p = pathlib.Path(path)
+            if p.is_dir():
+                # If it's a directory, we end with the slash and no space. That
+                # makes it more natural to continue to expand.
+                res.append(f"{path}{os.sep}")
+            elif p.suffix in self.SUFFIXES:
+                # If it's a file, we only consider Zeek-relevant script
+                # files. Expansion is for sure complete and we can add a space.
+                res.append(path + " ")
+        return res
+
+
+class ZeekScriptTree(ScriptTree):
+    """A specialization that completes relative to a given (ZEEKPATH) directory."""
 
     def __init__(self, path: str, limit: int = 100):
         """Constructor. The path argument is the directory at which we root the
         tree, and limit is the maximum number of files to yield.
         """
+        super().__init__(limit)
         self.path = pathlib.Path(path)
-        self.limit = limit
 
     def match(self, prefix: str) -> list[str]:
         res: list[str] = []
         for p in islice(self.path.glob(prefix + "*"), self.limit):
-            # The path relative to the root of the tree:
+            # The path relative to the root of the tree. This ensures we get
+            # paths starting from the entries of ZEEKPATH, not absolute paths.
             rpath = p.relative_to(self.path)
+            # As in the base class:
             if p.is_dir():
-                # If it's a directory, we end with the slash and no space. It's
-                # relatively likely the user wants to continue to expand.
                 res.append(f"{rpath}{os.sep}")
             elif p.suffix in self.SUFFIXES:
-                # If it's a file, we only consider Zeek-relevant script
-                # files. Expansion is for sure complete and we can add a space.
                 res.append(str(rpath) + " ")
         return res
 
 
 class ZeekScriptCompleter:
-    """This attempts path expansion for any prefixes that we cannot otherwise
-    complete, based on the contents of ZEEPATH."""
+    """This attempts path expansion for Zeek scripts, based on the directories
+    in ZEEPATH as well as the local directory."""
 
     def __init__(self, zeekpath: str):
         self.zeekpath = zeekpath
         self.roots = [ZeekScriptTree(path) for path in zeekpath.split(os.pathsep)]
 
     def match(self, prefix: str) -> list[str]:
-        res: list[str] = []
-        # This considers all possible roots, which is likely more helpful to the
-        # user but might also lead to a lot of completions.
+        # First try local, shell-style expansion. If this hits, we're done.
+        res: list[str] = ScriptTree().match(prefix)
+        if res:
+            return res
+
+        # We're also done if this is an absolute path, which cannot match
+        # relative to the ones in ZEEKPATH.
+        if pathlib.Path(prefix).is_absolute():
+            return res
+
+        # Finally, consider ZEEKPATH. This traverses all roots, as opposed to
+        # stopping after the first root that produced results. This is likely
+        # more helpful to the user, but risks a lengthy list of completions.
         for root in self.roots:
             res.extend(root.match(prefix))
         return res
+
+
+class ZeekGlobalsCompleter:
+    SCRIPT = """
+event zeek_init() &priority=10000 {
+    for ( n, id in global_ids() )
+        if ( id$redefinable )
+            print fmt("%s %s", n, id$type_name);
+    exit(0);
+}
+"""
+
+    def __init__(self, args: ZeekArgs, lctx: LineContext):
+        self.args = args
+        self.lctx = lctx
+
+    def match(self, prefix: str) -> list[str]:
+        # We need to invoke Zeek so that it actually runs (i.e., not just in
+        # parse mode), possibly in bare mode if requested, while ensuring exit
+        # right after we print globals and without doing another "runtime-like"
+        # things (peerings, ZeroMQ, etc).
+        #
+        # So scan the command line for potential bare mode and any non-options
+        # (which are hopefully scripts or redefs), and then tuck on our script.
+        args = [self.lctx.cmd]
+
+        for arg in self.lctx.line_words[1:]:
+            # Keep bare mode, if asked for. Drop all other arguments.
+            if arg == "-b" or arg == "--bare-mode":
+                args.append(arg)
+                continue
+
+            # We should technically include any script args the user has on the
+            # command line, since they might affect the available globals. But
+            # we can't currently distinguish such arguments from options given
+            # to command-line args (like an interface to -i), which could
+            # include invalid bits that break the Zeek invocation.
+
+        args.extend(["-e", self.get_script()])
+
+        try:
+            # Run Zeek in an auto-deleted temp directory in case it generates
+            # any files:
+            with tempfile.TemporaryDirectory(prefix="zeek-complete-") as tmpdir:
+                res = subprocess.run(
+                    args, cwd=tmpdir, capture_output=True, text=True, timeout=2
+                )
+        except subprocess.TimeoutExpired:
+            return []
+
+        if res.returncode != 0:
+            return []
+
+        globals: list[str] = []
+
+        for glbl in res.stdout.splitlines():
+            try:
+                name, typ = glbl.strip().split(maxsplit=1)
+                if name.lower().startswith(prefix.lower()):
+                    # Experimental: include type info in tab-tab output,
+                    # not otherwise. This might get in the way?
+                    if self.lctx.comp_type == CompType.SUCCESSIVE:
+                        globals.append(f"{name}=<{typ}>")
+                    else:
+                        globals.append(name)
+            except ValueError:
+                continue
+
+        return globals
+
+    def get_script(self) -> str:
+        """Returns a minified string for the globals-printing Zeek script."""
+        return re.sub(r"\s+", " ", self.SCRIPT)
 
 
 def prefix_filter(lst: list[str], prefix: str) -> list[str]:
@@ -374,8 +490,8 @@ def main() -> int:
         return 1
 
     # Figure out what we should offer for completion.
+    # See if we have the start of a command-line argument:
     if ctx.curr_word.startswith("-"):
-        # Normal completion of an argument in progress:
         matches = zargs.find_by_match(ctx.curr_word)
         if print_list(matches):
             return 0
@@ -383,18 +499,28 @@ def main() -> int:
     if ctx.prev_word.startswith("-") and (
         not ctx.curr_word or not ctx.curr_word.startswith("-")
     ):
-        # The previous word is an argument, and the current isn't.  This might
-        # be a case for expanding the parameter to the argument (e.g. a network
-        # interface to -i).
+        # The previous word is an argument, and the current isn't. This might be
+        # a parameter to the argument, such as a network interface to -i.
         params = zargs.find_arg_param(ctx.prev_word, ctx.curr_word)
         if print_list(params):
             return 0
 
-    # Try script path completion next if we have anything to go on:
-    if ctx.curr_word and not ctx.curr_word.startswith("-"):
+    # Try script path completion next:
+    if (
+        ctx.curr_word
+        and not ctx.curr_word.startswith("-")
+        and not ctx.curr_word.endswith("=")
+    ):
         zscomp = ZeekScriptCompleter(zargs.zeekpath)
         scripts = zscomp.match(ctx.curr_word)
         if print_list(scripts, suffix=""):
+            return 0
+
+    # And at last, try redefing globals.
+    if ctx.curr_word:
+        zgcomp = ZeekGlobalsCompleter(zargs, ctx)
+        glbls = zgcomp.match(ctx.curr_word)
+        if print_list(glbls, suffix=""):
             return 0
 
     # If we have nothing, our invocation via "complete" should fall back to
