@@ -20,12 +20,6 @@ import traceback
 from itertools import islice
 from typing import Any
 
-try:
-    # For a portable way to get network interfaces:
-    import psutil  # type: ignore
-except ImportError:
-    pass
-
 
 class CompType(enum.Enum):
     """An enum representation of the numerical completion type values passed in
@@ -153,8 +147,8 @@ class ZeekArgs:
         if res.returncode != 0:
             return False
 
-        lines = [line.strip() for line in res.stdout.splitlines()]
-        if not lines or not lines[0].lower().startswith("zeek version"):
+        lines = [line.lstrip() for line in res.stdout.splitlines()]
+        if not lines or not lines[0].startswith("zeek version"):
             return False
 
         for line in lines:
@@ -163,15 +157,16 @@ class ZeekArgs:
                 mob = self.zeekpath_re.match(line)
                 if mob is not None and len(mob.groups()) == 1:
                     self.zeekpath = mob.group(1)
-                    continue
+                # This is currently the last line we care about in the output.
+                break
 
             # For argument parsing, grab lines starting with a command-line
             # argument, and split those lines along "|". We should have at least
             # two resulting strings; three if the argument has short and long
             # forms.
-            if not line.strip().startswith("-"):
+            if not line.startswith("-"):
                 continue
-            parts = line.strip().split("|")
+            parts = line.split("|")
             if len(parts) < 2:
                 continue
 
@@ -254,8 +249,13 @@ class ZeekArgs:
         This works only of the psutil module is available, otherwise this returns an
         empty list.
         """
-        if "psutil" in sys.modules:
-            return psutil.net_if_addrs().keys()  # type: ignore
+        try:
+            # For a portable way to get network interfaces:
+            from psutil import net_if_addrs  # type: ignore
+
+            return net_if_addrs().keys()  # type: ignore
+        except ImportError:
+            pass
         return []
 
     def _get_zeek_debugstreams(self) -> list[str]:
