@@ -133,10 +133,16 @@ class ZeekArgs:
         self.zeekpath: str = os.getenv("ZEEKPATH", "")
         self.zeekpath_re = re.compile(r"\$ZEEKPATH *\|.+\((.+)\)")
 
+        # Track whether we've parsed Zeek help output so we do it only once.
+        self.parsed = False
+
     def parse(self) -> bool:
         """Grabs the output of "zeek --help" via the given command, and parses
         the command-line args in to self.args.
         """
+        if self.parsed:
+            return True
+
         try:
             res = subprocess.run(
                 (self.cmd, "--help"), capture_output=True, text=True, timeout=1
@@ -201,6 +207,7 @@ class ZeekArgs:
                 shortarg, longparts[0], param, param_optional
             )
 
+        self.parsed = True
         return True
 
     def find_by_match(self, prefix: str) -> list[MatchedArg]:
@@ -344,19 +351,42 @@ class ZeekScriptTree(ScriptTree):
 
     def match(self, prefix: str) -> list[str]:
         res: list[str] = []
-        for p in islice(self.path.glob(prefix + "*"), self.limit):
-            # The path relative to the root of the tree. This ensures we get
-            # paths starting from the entries of ZEEKPATH, not absolute paths.
-            rpath = p.relative_to(self.path)
-            # As in the base class:
-            if p.is_dir():
-                res.append(f"{rpath}{os.sep}")
-            elif p.suffix in self.SUFFIXES:
-                res.append(str(rpath) + " ")
+        try:
+            # If the prefix is an absolute path, pathlib-globbing it will raise
+            # a NotImplementedError. Be robust:
+            for p in islice(self.path.glob(prefix + "*"), self.limit):
+                # The path relative to the root of the tree. This ensures we get
+                # paths starting from the entries of ZEEKPATH, not absolute paths.
+                rpath = p.relative_to(self.path)
+                # As in the base class:
+                if p.is_dir():
+                    res.append(f"{rpath}{os.sep}")
+                elif p.suffix in self.SUFFIXES:
+                    res.append(str(rpath) + " ")
+        except NotImplementedError:
+            pass
         return res
 
 
-class ZeekScriptCompleter:
+class Completer:
+    """A thing that can complete content based on a string prefix."""
+
+    def match(self, prefix: str) -> list[str]:
+        return []
+
+
+class LocalScriptCompleter(Completer):
+    """A completer for directory-local as well as absolute-path expansion for
+    Zeek scripts."""
+
+    def match(self, prefix: str) -> list[str]:
+        res: list[str] = ScriptTree().match(prefix)
+        if res:
+            return res
+        return []
+
+
+class ZeekpathScriptCompleter(Completer):
     """This attempts path expansion for Zeek scripts, based on the directories
     in ZEEPATH as well as the local directory."""
 
@@ -365,25 +395,16 @@ class ZeekScriptCompleter:
         self.roots = [ZeekScriptTree(path) for path in zeekpath.split(os.pathsep)]
 
     def match(self, prefix: str) -> list[str]:
-        # First try local, shell-style expansion. If this hits, we're done.
+        # This traverses all roots, as opposed to stopping after the first root
+        # that produced results. This is likely more helpful to the user, but
+        # risks a lengthy list of completions.
         res: list[str] = ScriptTree().match(prefix)
-        if res:
-            return res
-
-        # We're also done if this is an absolute path, which cannot match
-        # relative to the ones in ZEEKPATH.
-        if pathlib.Path(prefix).is_absolute():
-            return res
-
-        # Finally, consider ZEEKPATH. This traverses all roots, as opposed to
-        # stopping after the first root that produced results. This is likely
-        # more helpful to the user, but risks a lengthy list of completions.
         for root in self.roots:
             res.extend(root.match(prefix))
         return res
 
 
-class ZeekGlobalsCompleter:
+class ZeekGlobalsCompleter(Completer):
     SCRIPT = """
 event zeek_init() &priority=10000 {
     for ( n, id in global_ids() )
@@ -484,47 +505,71 @@ def main() -> int:
         return 0
 
     ctx = LineContext(cmd, curr_word, prev_word)
-
     zargs = ZeekArgs(ctx.cmd)
-    if not zargs.parse():
-        return 1
 
-    # Figure out what we should offer for completion.
-    # See if we have the start of a command-line argument:
-    if ctx.curr_word.startswith("-"):
-        matches = zargs.find_by_match(ctx.curr_word)
-        if print_list(matches):
-            return 0
-
-    if ctx.prev_word.startswith("-") and (
-        not ctx.curr_word or not ctx.curr_word.startswith("-")
-    ):
-        # The previous word is an argument, and the current isn't. This might be
-        # a parameter to the argument, such as a network interface to -i.
-        params = zargs.find_arg_param(ctx.prev_word, ctx.curr_word)
-        if print_list(params):
-            return 0
-
-    # Try script path completion next:
+    # First, try simple path-based script completion. For this we need to
+    # parsing of Zeek output. This is similar to standard shell expansion, but
+    # doing this ourselves allows os to control ordering relative to other
+    # completion strategies.
     if (
         ctx.curr_word
         and not ctx.curr_word.startswith("-")
         and not ctx.curr_word.endswith("=")
     ):
-        zscomp = ZeekScriptCompleter(zargs.zeekpath)
+        lsc = LocalScriptCompleter()
+        scripts = lsc.match(ctx.curr_word)
+        if print_list(scripts, suffix=""):
+            return 0
+
+    # If the current word is an (absolute or relative) file system path and we
+    # get here, no other completions will work.
+    if (
+        ctx.curr_word.startswith(os.sep)
+        or ctx.curr_word.startswith(os.curdir)
+        or ctx.curr_word.startswith(os.pardir + os.sep)
+    ):
+        return 0
+
+    # With the start of a command-line argument, apply argument completion:
+    if ctx.curr_word.startswith("-"):
+        if not zargs.parse():
+            return 1
+        matches = zargs.find_by_match(ctx.curr_word)
+        if print_list(matches):
+            return 0
+
+    # Next, if the previous word is an argument, and the current isn't, this
+    # might be a parameter to the argument, such as a network interface to -i.
+    if ctx.prev_word.startswith("-") and (
+        not ctx.curr_word or not ctx.curr_word.startswith("-")
+    ):
+        if not zargs.parse():
+            return 1
+        params = zargs.find_arg_param(ctx.prev_word, ctx.curr_word)
+        if print_list(params):
+            return 0
+
+    # If it looks file-like, try script path completion based on ZEEKPATH:
+    if (
+        ctx.curr_word
+        and not ctx.curr_word.startswith("-")
+        and not ctx.curr_word.endswith("=")
+    ):
+        if not zargs.parse():
+            return 1
+        zscomp = ZeekpathScriptCompleter(zargs.zeekpath)
         scripts = zscomp.match(ctx.curr_word)
         if print_list(scripts, suffix=""):
             return 0
 
     # And at last, try redefing globals.
     if ctx.curr_word:
+        if not zargs.parse():
+            return 1
         zgcomp = ZeekGlobalsCompleter(zargs, ctx)
         glbls = zgcomp.match(ctx.curr_word)
         if print_list(glbls, suffix=""):
             return 0
-
-    # If we have nothing, our invocation via "complete" should fall back to
-    # regular local path completion.
 
     return 0
 
