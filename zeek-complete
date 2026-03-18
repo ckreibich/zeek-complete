@@ -244,7 +244,25 @@ class ZeekArgs:
             if zarg.shortarg == "-i":
                 return prefix_filter(self._get_sys_interfaces(), prefix)
             elif zarg.shortarg == "-B":
-                return prefix_filter(self._get_zeek_debugstreams(), prefix)
+                # This takes a comma-separated list of debug streams. The
+                # existing list will be in prefix ("foo,bar,", or perhaps
+                # "foo,b"), which we can't use as-is to match against available
+                # debug streams: focus on anything after the last comma, exclude
+                # anything already selected, ...
+                parts = prefix.rsplit(",", maxsplit=1)
+                exclusions: set[str] = set()
+                prior = ""
+                if len(parts) > 1:
+                    prior = parts[0] + ","
+                    exclusions = set(parts[0].split(","))
+                # ... and tuck anything up to and including the comma back onto
+                # our returned results.
+                return [
+                    prior + p
+                    for p in prefix_filter(
+                        self._get_zeek_debugstreams(), parts[-1], exclusions
+                    )
+                ]
             elif zarg.shortarg == "-O":
                 return prefix_filter(self._get_zeek_optimizations(), prefix)
 
@@ -477,9 +495,15 @@ event zeek_init() &priority=10000 {
         return re.sub(r"\s+", " ", self.SCRIPT)
 
 
-def prefix_filter(lst: list[str], prefix: str) -> list[str]:
-    """Filters the given list down to items starting with the given prefix."""
-    return [item for item in lst if str(item).startswith(prefix)]
+def prefix_filter(
+    lst: list[str], prefix: str, exclusions: set[str] = set()
+) -> list[str]:
+    """Filters the given list down to items starting with the given prefix. Any
+    exclusions must match the list items completely and are eliminted prior to
+    prefix-matching."""
+    return [
+        item for item in lst if item not in exclusions and str(item).startswith(prefix)
+    ]
 
 
 def print_list(lst: list[Any], suffix: str = " ") -> bool:
