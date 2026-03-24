@@ -243,6 +243,9 @@ class ZeekArgs:
             zarg = matches[0].arg
             if zarg.shortarg == "-i":
                 return prefix_filter(self._get_sys_interfaces(), prefix)
+            elif zarg.shortarg == "-r":
+                # Simply do regular path expansion to complete pcaps.
+                return FileCompleter().match(prefix)
             elif zarg.shortarg == "-B":
                 # This takes a comma-separated list of debug streams. The
                 # existing list will be in prefix ("foo,bar,", or perhaps
@@ -330,16 +333,17 @@ class ZeekArgs:
         return opts
 
 
-class ScriptTree:
-    """Base class for Zeek script path completion. This works just like normal
+class FileTree:
+    """Base class for file path completion. This works just like normal
     path expansion in your shell, based on a local prefix, and completing the
-    exact prefix string you enter.
+    exact prefix string you enter. Can optionally focus on Zeek scripts & JS.
     """
 
     # If you want .bro, you're old enough to be used to typing a lot. ;-)
-    SUFFIXES = [".zeek", ".js"]
+    ZEEK_SUFFIXES = [".zeek", ".js"]
 
-    def __init__(self, limit: int = 100):
+    def __init__(self, zeek_only: bool = False, limit: int = 1000):
+        self.zeek_only = zeek_only
         self.limit = limit
 
     def match(self, prefix: str) -> list[str]:
@@ -350,21 +354,22 @@ class ScriptTree:
                 # If it's a directory, we end with the slash and no space. That
                 # makes it more natural to continue to expand.
                 res.append(f"{path}{os.sep}")
-            elif p.suffix in self.SUFFIXES:
-                # If it's a file, we only consider Zeek-relevant script
-                # files. Expansion is for sure complete and we can add a space.
-                res.append(path + " ")
+                continue
+            if self.zeek_only and p.suffix not in self.ZEEK_SUFFIXES:
+                continue
+            res.append(path + " ")
+
         return res
 
 
-class ZeekScriptTree(ScriptTree):
+class ZeekpathScriptTree(FileTree):
     """A specialization that completes relative to a given (ZEEKPATH) directory."""
 
-    def __init__(self, path: str, limit: int = 100):
+    def __init__(self, path: str, limit: int = 1000):
         """Constructor. The path argument is the directory at which we root the
         tree, and limit is the maximum number of files to yield.
         """
-        super().__init__(limit)
+        super().__init__(zeek_only=True, limit=limit)
         self.path = pathlib.Path(path)
 
     def match(self, prefix: str) -> list[str]:
@@ -379,7 +384,7 @@ class ZeekScriptTree(ScriptTree):
                 # As in the base class:
                 if p.is_dir():
                     res.append(f"{rpath}{os.sep}")
-                elif p.suffix in self.SUFFIXES:
+                elif p.suffix in self.ZEEK_SUFFIXES:
                     res.append(str(rpath) + " ")
         except NotImplementedError:
             pass
@@ -393,12 +398,23 @@ class Completer:
         return []
 
 
-class LocalScriptCompleter(Completer):
+class FileCompleter(Completer):
+    """A completer for directory-local as well as absolute-path expansion for
+    any kind of file."""
+
+    def match(self, prefix: str) -> list[str]:
+        res: list[str] = FileTree().match(prefix)
+        if res:
+            return res
+        return []
+
+
+class ScriptCompleter(Completer):
     """A completer for directory-local as well as absolute-path expansion for
     Zeek scripts."""
 
     def match(self, prefix: str) -> list[str]:
-        res: list[str] = ScriptTree().match(prefix)
+        res: list[str] = FileTree(zeek_only=True).match(prefix)
         if res:
             return res
         return []
@@ -410,13 +426,13 @@ class ZeekpathScriptCompleter(Completer):
 
     def __init__(self, zeekpath: str):
         self.zeekpath = zeekpath
-        self.roots = [ZeekScriptTree(path) for path in zeekpath.split(os.pathsep)]
+        self.roots = [ZeekpathScriptTree(path) for path in zeekpath.split(os.pathsep)]
 
     def match(self, prefix: str) -> list[str]:
         # This traverses all roots, as opposed to stopping after the first root
         # that produced results. This is likely more helpful to the user, but
         # risks a lengthy list of completions.
-        res: list[str] = ScriptTree().match(prefix)
+        res: list[str] = FileTree(zeek_only=True).match(prefix)
         for root in self.roots:
             res.extend(root.match(prefix))
         return res
@@ -540,19 +556,10 @@ def main() -> int:
         and not ctx.curr_word.startswith("-")
         and not ctx.curr_word.endswith("=")
     ):
-        lsc = LocalScriptCompleter()
+        lsc = ScriptCompleter()
         scripts = lsc.match(ctx.curr_word)
         if print_list(scripts, suffix=""):
             return 0
-
-    # If the current word is an (absolute or relative) file system path and we
-    # get here, no other completions will work.
-    if (
-        ctx.curr_word.startswith(os.sep)
-        or ctx.curr_word.startswith(os.curdir)
-        or ctx.curr_word.startswith(os.pardir + os.sep)
-    ):
-        return 0
 
     # With the start of a command-line argument, apply argument completion:
     if ctx.curr_word.startswith("-"):
