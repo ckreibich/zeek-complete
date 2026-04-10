@@ -348,7 +348,7 @@ class FileTree:
 
     def match(self, prefix: str) -> list[str]:
         res: list[str] = []
-        for path in islice(glob.glob(prefix + "*"), self.limit):
+        for path in islice(glob.glob(self.expand_prefix(prefix) + "*"), self.limit):
             p = pathlib.Path(path)
             if p.is_dir():
                 # If it's a directory, we end with the slash and no space. That
@@ -360,6 +360,11 @@ class FileTree:
             res.append(path + " ")
 
         return res
+
+    def expand_prefix(self, prefix: str) -> str:
+        """Apply tile and environment variable expansion on the given file path
+        prefix, and return the result."""
+        return os.path.expandvars(os.path.expanduser(prefix))
 
 
 class ZeekpathScriptTree(FileTree):
@@ -377,7 +382,9 @@ class ZeekpathScriptTree(FileTree):
         try:
             # If the prefix is an absolute path, pathlib-globbing it will raise
             # a NotImplementedError. Be robust:
-            for p in islice(self.path.glob(prefix + "*"), self.limit):
+            for p in islice(
+                self.path.glob(self.expand_prefix(prefix) + "*"), self.limit
+            ):
                 # The path relative to the root of the tree. This ensures we get
                 # paths starting from the entries of ZEEKPATH, not absolute paths.
                 rpath = p.relative_to(self.path)
@@ -570,7 +577,8 @@ def main() -> int:
             return 0
 
     # Next, if the previous word is an argument, and the current isn't, this
-    # might be a parameter to the argument, such as a network interface to -i.
+    # might be a parameter to the argument, such as a network interface to -i,
+    # or a pcap to -r.
     if ctx.prev_word.startswith("-") and (
         not ctx.curr_word or not ctx.curr_word.startswith("-")
     ):
