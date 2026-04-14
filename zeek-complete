@@ -242,17 +242,22 @@ class ZeekArgs:
                 res.append(match)
         return res
 
-    def find_arg_param(self, arg: str, prefix: str) -> list[str]:
+    def find_arg_param(self, lctx: LineContext) -> list[str]:
         """Returns possible parameters to a given argument, such as network
-        interfaces for "-i". arg is that previous argument, and prefix is any
-        beginning parameter string.
+        interfaces for "-i".
         """
+        arg = lctx.prev_word
+        prefix = lctx.curr_word
+
         matches = self.find(arg)
 
         if len(matches) == 1 and matches[0].arg.param:
             zarg = matches[0].arg
             if zarg.shortarg == "-i":
                 return prefix_filter(self._get_sys_interfaces(), prefix)
+            elif zarg.shortarg == "-I":
+                zgcomp = ZeekGlobalsCompleter(self, lctx, redefables_only=False)
+                return zgcomp.match(prefix)
             elif zarg.needs_file_param:
                 # Simply do regular path expansion to complete pcaps etc
                 return FileCompleter().match(prefix)
@@ -456,7 +461,15 @@ class ZeekpathScriptCompleter(Completer):
 
 
 class ZeekGlobalsCompleter(Completer):
-    SCRIPT = """
+    SCRIPT_ALL = """
+event zeek_init() &priority=10000 {
+    for ( n, id in global_ids() )
+        print fmt("%s %s", n, id$type_name);
+    exit(0);
+}
+"""
+
+    SCRIPT_REDEFABLES = """
 event zeek_init() &priority=10000 {
     for ( n, id in global_ids() )
         if ( id$redefinable )
@@ -465,9 +478,10 @@ event zeek_init() &priority=10000 {
 }
 """
 
-    def __init__(self, args: ZeekArgs, lctx: LineContext):
+    def __init__(self, args: ZeekArgs, lctx: LineContext, redefables_only: bool = True):
         self.args = args
         self.lctx = lctx
+        self.redefables_only = redefables_only
 
     def match(self, prefix: str) -> list[str]:
         # We need to invoke Zeek so that it actually runs (i.e., not just in
@@ -525,7 +539,10 @@ event zeek_init() &priority=10000 {
 
     def get_script(self) -> str:
         """Returns a minified string for the globals-printing Zeek script."""
-        return re.sub(r"\s+", " ", self.SCRIPT)
+        if self.redefables_only:
+            return re.sub(r"\s+", " ", self.SCRIPT_REDEFABLES)
+
+        return re.sub(r"\s+", " ", self.SCRIPT_ALL)
 
 
 def prefix_filter(
@@ -594,7 +611,7 @@ def main() -> int:
     ):
         if not zargs.parse():
             return 1
-        params = zargs.find_arg_param(ctx.prev_word, ctx.curr_word)
+        params = zargs.find_arg_param(ctx)
         if print_list(params):
             return 0
 
