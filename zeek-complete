@@ -62,19 +62,29 @@ class LineContext:
 
 class ZeekArg:
     """A command-line argument to Zeek, with optional additional parameters
-    (such as a network interface to -i, or a debug stream to -B."""
+    (such as a network interface to -i, or a debug stream to -B). A long-form
+    ("--foo") is always required, a short form ("-f") is usually but not always
+    available.
+    """
 
     def __init__(
         self,
-        shortarg: str,
-        longarg: str = "",
+        longarg: str,
+        shortarg: str = "",
         param: str = "",
         param_optional: bool = False,
     ):
-        self.shortarg = shortarg
-        self.longarg = longarg
-        self.param = param
-        self.param_optional = param_optional
+        self.longarg = longarg  # The long-form arg, e.g. "--foo"
+        self.shortarg = shortarg  # The short-form arg, e.g. "-f"
+        self.param = param  # The param, e.g. "interface"
+        self.param_optional = param_optional  # Whether the param is optional
+
+        # Determine whether the argument needs a file parameter. We do this
+        # mostly heuristically and with some special-casing:
+        self.needs_file_param = "file" in self.param
+
+        if self.longarg in ("--optimize-files", "--no-optimize-files"):
+            self.needs_file_param = True
 
     def __str__(self) -> str:
         if self.shortarg:
@@ -204,7 +214,7 @@ class ZeekArgs:
                 param = longparts[1]  # Things like "file", "level", or "interface"
 
             self.args[longparts[0]] = ZeekArg(
-                shortarg, longparts[0], param, param_optional
+                longparts[0], shortarg, param, param_optional
             )
 
         self.parsed = True
@@ -243,8 +253,8 @@ class ZeekArgs:
             zarg = matches[0].arg
             if zarg.shortarg == "-i":
                 return prefix_filter(self._get_sys_interfaces(), prefix)
-            elif zarg.shortarg == "-r":
-                # Simply do regular path expansion to complete pcaps.
+            elif zarg.needs_file_param:
+                # Simply do regular path expansion to complete pcaps etc
                 return FileCompleter().match(prefix)
             elif zarg.shortarg == "-B":
                 # This takes a comma-separated list of debug streams. The
