@@ -253,12 +253,7 @@ class ZeekArgs:
 
         if len(matches) == 1 and matches[0].arg.param:
             zarg = matches[0].arg
-            if zarg.shortarg == "-i":
-                return prefix_filter(self._get_sys_interfaces(), prefix)
-            elif zarg.shortarg == "-I":
-                zgcomp = ZeekGlobalsCompleter(self, lctx, redefables_only=False)
-                return zgcomp.match(prefix)
-            elif zarg.needs_file_param:
+            if zarg.needs_file_param:
                 # Simply do regular path expansion to complete pcaps etc
                 return FileCompleter().match(prefix)
             elif zarg.shortarg == "-B":
@@ -281,8 +276,16 @@ class ZeekArgs:
                         self._get_zeek_debugstreams(), parts[-1], exclusions
                     )
                 ]
+            elif zarg.shortarg == "-i":
+                return prefix_filter(self._get_sys_interfaces(), prefix)
+            elif zarg.shortarg == "-I":
+                zgcomp = ZeekGlobalsCompleter(self, lctx)
+                return zgcomp.match(prefix)
             elif zarg.shortarg == "-O":
                 return prefix_filter(self._get_zeek_optimizations(), prefix)
+            elif zarg.longarg in ("--optimize-funcs", "--no-optimize-funcs"):
+                zgcomp = ZeekGlobalsCompleter(self, lctx, funcs_only=True)
+                return zgcomp.match(prefix)
 
         return []
 
@@ -461,27 +464,26 @@ class ZeekpathScriptCompleter(Completer):
 
 
 class ZeekGlobalsCompleter(Completer):
-    SCRIPT_ALL = """
+    SCRIPT = """
 event zeek_init() &priority=10000 {
     for ( n, id in global_ids() )
-        print fmt("%s %s", n, id$type_name);
-    exit(0);
-}
-"""
-
-    SCRIPT_REDEFABLES = """
-event zeek_init() &priority=10000 {
-    for ( n, id in global_ids() )
-        if ( id$redefinable )
+        if ( @CONDITIONS@ )
             print fmt("%s %s", n, id$type_name);
     exit(0);
 }
 """
 
-    def __init__(self, args: ZeekArgs, lctx: LineContext, redefables_only: bool = True):
+    def __init__(
+        self,
+        args: ZeekArgs,
+        lctx: LineContext,
+        redefables_only: bool = False,
+        funcs_only: bool = False,
+    ):
         self.args = args
         self.lctx = lctx
         self.redefables_only = redefables_only
+        self.funcs_only = funcs_only
 
     def match(self, prefix: str) -> list[str]:
         # We need to invoke Zeek so that it actually runs (i.e., not just in
@@ -539,10 +541,18 @@ event zeek_init() &priority=10000 {
 
     def get_script(self) -> str:
         """Returns a minified string for the globals-printing Zeek script."""
-        if self.redefables_only:
-            return re.sub(r"\s+", " ", self.SCRIPT_REDEFABLES)
+        conditions = []
 
-        return re.sub(r"\s+", " ", self.SCRIPT_ALL)
+        # Populate the globals-filtering if-condition depending on flags:
+        if self.redefables_only:
+            conditions.append("id$redefinable")
+        if self.funcs_only:
+            conditions.append('starts_with(id$type_name, "function(")')
+        if not conditions:
+            conditions.append("T")
+
+        script = re.sub(r"@CONDITIONS@", "&&".join(conditions), self.SCRIPT)
+        return re.sub(r"\s+", " ", script)
 
 
 def prefix_filter(
@@ -632,7 +642,7 @@ def main() -> int:
     if ctx.curr_word:
         if not zargs.parse():
             return 1
-        zgcomp = ZeekGlobalsCompleter(zargs, ctx)
+        zgcomp = ZeekGlobalsCompleter(zargs, ctx, redefables_only=True)
         glbls = zgcomp.match(ctx.curr_word)
         if print_list(glbls, suffix=""):
             return 0
