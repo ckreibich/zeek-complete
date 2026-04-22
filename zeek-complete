@@ -3,7 +3,7 @@
 accompanying "zeek" shell script, and install it in any of your system's
 bash_completion.d directories."""
 
-# For easier forward references in type annotations
+# For easier forward references in type annotations -- not needed in 3.14+
 from __future__ import annotations
 
 import enum
@@ -80,9 +80,9 @@ class ZeekArg:
         self.param_optional = param_optional  # Whether the param is optional
 
         # Determine whether the argument needs a file parameter. We do this
-        # mostly heuristically and with some special-casing:
+        # heuristically based on the naming in the help output ...
         self.needs_file_param = "file" in self.param
-
+        # ...  and with some special-casing:
         if self.longarg in ("--optimize-files", "--no-optimize-files"):
             self.needs_file_param = True
 
@@ -146,7 +146,7 @@ class ZeekArgs:
         # Track whether we've parsed Zeek help output so we do it only once.
         self.parsed = False
 
-    def parse(self) -> bool:
+    def parse_help(self) -> bool:
         """Grabs the output of "zeek --help" via the given command, and parses
         the command-line args in to self.args.
         """
@@ -607,7 +607,7 @@ def main() -> int:
 
     # With the start of a command-line argument, apply argument completion:
     if ctx.curr_word.startswith("-"):
-        if not zargs.parse():
+        if not zargs.parse_help():
             return 1
         matches = zargs.find_by_match(ctx.curr_word)
         if print_list(matches):
@@ -619,7 +619,7 @@ def main() -> int:
     if ctx.prev_word.startswith("-") and (
         not ctx.curr_word or not ctx.curr_word.startswith("-")
     ):
-        if not zargs.parse():
+        if not zargs.parse_help():
             return 1
         params = zargs.find_arg_param(ctx)
         if print_list(params):
@@ -631,7 +631,7 @@ def main() -> int:
         and not ctx.curr_word.startswith("-")
         and not ctx.curr_word.endswith("=")
     ):
-        if not zargs.parse():
+        if not zargs.parse_help():
             return 1
         zscomp = ZeekpathScriptCompleter(zargs.zeekpath)
         scripts = zscomp.match(ctx.curr_word)
@@ -640,7 +640,7 @@ def main() -> int:
 
     # And at last, try redefing globals.
     if ctx.curr_word:
-        if not zargs.parse():
+        if not zargs.parse_help():
             return 1
         zgcomp = ZeekGlobalsCompleter(zargs, ctx, redefables_only=True)
         glbls = zgcomp.match(ctx.curr_word)
