@@ -37,7 +37,7 @@ class CompType(enum.Enum):
 
 
 class LineContext:
-    """This provides the context we're in on the current line. The command, the
+    """This provides the context of the current input line: the command, the
     current word (up to the point -- for example, if the last word is "foo" and
     the cursor is at "f<cursor>oo", the current word is "f") and a possible
     previous word are passed as arguments if we're invoked via "complete -C". We
@@ -54,10 +54,46 @@ class LineContext:
         self.line = os.getenv("COMP_LINE", "")
         self.point = os.getenv("COMP_POINT", "")
 
-        # All words on the current line, including the command, but keeping
-        # quoted content intact ('foo "bar baz"' turns into two words, "foo" and
-        # "bar baz"):
-        self.line_words: list[str] = shlex.split(self.line)
+        # All words on the current line, including the command, excluding the
+        # current word if any, but keeping quoted content intact ('foo "bar
+        # baz"' turns into two words, "foo" and "bar baz"):
+        self.line_words: list[str] = shlex.split(self.line.removesuffix(self.curr_word))
+
+        self.args: set[ZeekArg] = set()
+        self.scripts: set[str] = set()
+        self.redefs: set[str] = set()
+
+        self.parsed: bool = False
+
+    def parse(self, args: ZeekArgs) -> None:
+        if self.parsed:
+            return
+
+        # Work on a copy and skip the command:
+        words = self.line_words.copy()[1:]
+
+        while words:
+            word = words.pop(0)
+
+            # See if it's a command-line argument:
+            if word.startswith("-"):
+                matches = args.find(word)
+                if len(matches) == 1:
+                    self.args.add(matches[0])
+                    if matches[0].param and not matches[0].param_optional and words:
+                        # Eat the remaining parameter to the argument
+                        words.pop(0)
+                continue
+
+            # A ":" or "=" character signifies a redef:
+            if ":" in word or "=" in word:
+                self.redefs.add(word)
+                continue
+
+            # Otherwise let's assume it's a script to load.
+            self.scripts.add(word)
+
+        self.parsed = True
 
 
 class ZeekArg:
@@ -94,6 +130,13 @@ class ZeekArg:
         if self.param:
             res = f"{res} {'<' if self.param_optional else ''}{self.param}{'>' if self.param_optional else ''}"
         return res
+
+    def __eq__(self, other: ZeekArg) -> bool:
+        # Keep this simple and assume the long-form is definitive:
+        return self.longarg == other.longarg
+
+    def __hash__(self) -> int:
+        return hash(self.longarg)
 
     def match(self, prefix: str) -> MatchedArg | None:
         """Returns a MatchedArg for this argument if the given prefix fits
@@ -493,19 +536,16 @@ event zeek_init() &priority=10000 {
         #
         # So scan the command line for potential bare mode and any non-options
         # (which are hopefully scripts or redefs), and then tuck on our script.
+        self.lctx.parse(self.args)
+
         args = [self.lctx.cmd]
 
-        for arg in self.lctx.line_words[1:]:
-            # Keep bare mode, if asked for. Drop all other arguments.
-            if arg == "-b" or arg == "--bare-mode":
-                args.append(arg)
-                continue
+        # Keep bare-mode
+        if self.args.args["--bare-mode"] in self.lctx.args:
+            args.append("-b")
 
-            # We should technically include any script args the user has on the
-            # command line, since they might affect the available globals. But
-            # we can't currently distinguish such arguments from options given
-            # to command-line args (like an interface to -i), which could
-            # include invalid bits that break the Zeek invocation.
+        for script in self.lctx.scripts:
+            args.append(script)
 
         args.extend(["-e", self.get_script()])
 
