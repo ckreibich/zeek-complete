@@ -6,6 +6,7 @@ bash_completion.d directories."""
 # For easier forward references in type annotations -- not needed in 3.14+
 from __future__ import annotations
 
+import argparse
 import enum
 import glob
 import os
@@ -37,12 +38,13 @@ class CompType(enum.Enum):
 
 
 class LineContext:
-    """This provides the context we're in on the current line. The command, the
+    """This provides the context of the current line input: the command, the
     current word (up to the point -- for example, if the last word is "foo" and
     the cursor is at "f<cursor>oo", the current word is "f") and a possible
-    previous word are passed as arguments if we're invoked via "complete -C". We
-    also grab the whole line, the point offset, and the completion type from
-    environment variables.
+    previous word are passed as arguments if we're invoked via "complete -C".
+    Such invocation also provides COMP_* environment variables for the whole
+    line, the point offset, and the completion type, so we grab these as
+    available as well.
     """
 
     def __init__(self, cmd: str, curr_word: str, prev_word: str):
@@ -54,17 +56,23 @@ class LineContext:
         self.line = os.getenv("COMP_LINE", "")
         self.point = os.getenv("COMP_POINT", "")
 
-        # All words on the current line, including the command, but keeping
-        # quoted content intact ('foo "bar baz"' turns into two words, "foo" and
-        # "bar baz"):
-        self.line_words: list[str] = shlex.split(self.line)
+        # All words on the current line, excluding the command (the first word),
+        # excluding the current word if any, but keeping quoted content intact
+        # ('foo "bar baz"' turns into two words, "foo" and "bar baz"):
+        self.line_words: list[str] = shlex.split(self.settled_line())[1:]
+
+    def settled_line(self) -> str:
+        """Returns the input line without any trailing word that's still
+        incomplete (i.e., any non-empty self.curr_word)."""
+        return self.line.removesuffix(self.curr_word)
 
 
 class ZeekArg:
     """A command-line argument to Zeek, with optional additional parameters
     (such as a network interface to -i, or a debug stream to -B). A long-form
     ("--foo") is always required, a short form ("-f") is usually but not always
-    available.
+    available. This class stores additional information about these arguments
+    and can match them completely or partially, which helps completion.
     """
 
     def __init__(
@@ -132,11 +140,22 @@ class MatchedArg:
 
 
 class ZeekArgs:
-    """Parses the command-line options as rendered by "zeek -h"."""
+    """This class stores all context for Zeek's available arguments. It does
+    this by parsing the output of "zeek --help", including the ZEEKPATH shown in
+    the output.
+    """
 
     def __init__(self, cmd: str):
         self.cmd: str = cmd
         self.args: dict[str, ZeekArg] = {}  # indexed by long-form arg
+
+        # A parser for the command line so we can easily parse the existing
+        # line. Zeek supports things like "-C -r ..." being the same as "-Cr",
+        # and can intersperse redefs and scripts anywhere betweem arguments, so
+        # parsing manually gets annoying quickly.
+        self.argparser = argparse.ArgumentParser(
+            "zeek", add_help=False, exit_on_error=False
+        )
 
         # The effective ZEEKPATH. We use the environment when available,
         # otherwise parse from Zeek's help output with the regex below.
@@ -147,8 +166,9 @@ class ZeekArgs:
         self.parsed = False
 
     def parse_help(self) -> bool:
-        """Grabs the output of "zeek --help" via the given command, and parses
-        the command-line args in to self.args.
+        """Grabs the output of "zeek --help" via the given command, parses it
+        into self.args, and populates an argparse.ArgumentParser. Returns True
+        if successful, False otherwise (e.g. when the invocation failed).
         """
         if self.parsed:
             return True
@@ -179,7 +199,9 @@ class ZeekArgs:
             # For argument parsing, grab lines starting with a command-line
             # argument, and split those lines along "|". We should have at least
             # two resulting strings; three if the argument has short and long
-            # forms.
+            # forms. Zeek's arguments always have at least a long form
+            # ("--foo"). They usually have both long and short forms. They never
+            # have only a short form ("-f").
             if not line.startswith("-"):
                 continue
             parts = line.split("|")
@@ -217,8 +239,58 @@ class ZeekArgs:
                 longparts[0], shortarg, param, param_optional
             )
 
+            # Parse the help output into an argparse parser:
+            arg_names = [longarg]
+            if shortarg:
+                arg_names.append(shortarg)
+
+            arg_details: dict[str, str | int | None] = {}
+
+            if param:
+                arg_details["nargs"] = 1
+                if param_optional:
+                    # The value doesn't matter here, it's just so
+                    # we have a default to assign when parsing:
+                    arg_details["default"] = "default"
+                    arg_details["nargs"] = "?"
+            else:
+                arg_details["action"] = "store_true"  # argparse bails on "nargs=0".
+
+            self.argparser.add_argument(*arg_names, **arg_details)  # type: ignore
+
         self.parsed = True
         return True
+
+    def parse_line(
+        self, lctx: LineContext
+    ) -> tuple[argparse.Namespace, list[str]] | tuple[None, None]:
+        """Parse the given line context via argparse into arguments and any
+        scripts/redefs provided. Returns these as a tuple, or None/None in case
+        of error.
+        """
+        try:
+            # Tricky: we want to process lctx.line_words, i.e. the command
+            # arguments on the current line, excluding the potential final
+            # in-progress word. However, if the last completed word is the
+            # opening of an argument that will need a parameter (say the line
+            # ends in "-i " -- note the space -- missing an interface), then
+            # argparse parsing will fail because a required argument isn't
+            # provided. So examine that last word and strip it if it's an
+            # argument that would need a subsequent parameter. If parsing fails
+            # due to other stuff earlier in the line, there's nothing we can do
+            # and we just won't offer completions.
+            words = lctx.line_words.copy()
+            if words:
+                marg = self.find(words[-1])
+                if marg is not None and marg.arg.param:
+                    words.pop()
+            return self.argparser.parse_known_args(words)
+        except argparse.ArgumentError:
+            # With this environment variable, fall through to the end of
+            # the script so the exception gets printed out for debugging.
+            if os.getenv("ZEEK_COMPLETE_EXCEPTIONS", ""):
+                raise
+            return None, None
 
     def find_by_match(self, prefix: str) -> list[MatchedArg]:
         """Returns a list of matching arguments based on prefix-matching the
@@ -231,16 +303,16 @@ class ZeekArgs:
                 res.append(match)
         return res
 
-    def find(self, arg: str) -> list[MatchedArg]:
-        """Returns a list of matching arguments based on exact match of the
-        given argument name against short or long versions.
+    def find(self, arg: str) -> MatchedArg | None:
+        """Returns a potential matching argument based on exact match of the
+        given argument name against short or long versions. Returns None
+        if no such argument exists.
         """
-        res: list[MatchedArg] = []
         for zarg in self.args.values():
             match: MatchedArg | None = zarg.equal(arg)
             if match is not None:
-                res.append(match)
-        return res
+                return match
+        return None
 
     def find_arg_param(self, lctx: LineContext) -> list[str]:
         """Returns possible parameters to a given argument, such as network
@@ -248,11 +320,10 @@ class ZeekArgs:
         """
         arg = lctx.prev_word
         prefix = lctx.curr_word
+        marg = self.find(arg)
 
-        matches = self.find(arg)
-
-        if len(matches) == 1 and matches[0].arg.param:
-            zarg = matches[0].arg
+        if marg is not None and marg.arg.param:
+            zarg = marg.arg
             if zarg.needs_file_param:
                 # Simply do regular path expansion to complete pcaps etc
                 return FileCompleter().match(prefix)
@@ -486,35 +557,34 @@ event zeek_init() &priority=10000 {
         self.funcs_only = funcs_only
 
     def match(self, prefix: str) -> list[str]:
-        # We need to invoke Zeek so that it actually runs (i.e., not just in
-        # parse mode), possibly in bare mode if requested, while ensuring exit
-        # right after we print globals and without doing another "runtime-like"
-        # things (peerings, ZeroMQ, etc).
-        #
-        # So scan the command line for potential bare mode and any non-options
-        # (which are hopefully scripts or redefs), and then tuck on our script.
-        args = [self.lctx.cmd]
+        # We need to invoke Zeek so that it actually runs through initialization
+        # (i.e., not just in parse mode), possibly in bare mode if requested,
+        # while ensuring exit right after we print globals. Scan the command
+        # line for potential bare mode and any non-options (which should be
+        # scripts or redefs), keep only these, and tuck on our script.
+        results = self.args.parse_line(self.lctx)
 
-        for arg in self.lctx.line_words[1:]:
-            # Keep bare mode, if asked for. Drop all other arguments.
-            if arg == "-b" or arg == "--bare-mode":
-                args.append(arg)
-                continue
+        if results[0] is None:
+            # The parse failed -- must be something pretty basic.
+            return []
 
-            # We should technically include any script args the user has on the
-            # command line, since they might affect the available globals. But
-            # we can't currently distinguish such arguments from options given
-            # to command-line args (like an interface to -i), which could
-            # include invalid bits that break the Zeek invocation.
+        parsed_args: argparse.Namespace = results[0]
+        scripts_and_redefs: list[str] = results[1]
+        cmd: list[str] = [self.args.cmd]
 
-        args.extend(["-e", self.get_script()])
+        if parsed_args.bare_mode:
+            cmd.append("-b")
+
+        for script_or_redef in scripts_and_redefs:
+            cmd.append(script_or_redef)
+
+        cmd.extend(["-e", self.get_script()])
 
         try:
-            # Run Zeek in an auto-deleted temp directory in case it generates
-            # any files:
+            # Run Zeek in an auto-deleted tempdir in case it generates files:
             with tempfile.TemporaryDirectory(prefix="zeek-complete-") as tmpdir:
                 res = subprocess.run(
-                    args, cwd=tmpdir, capture_output=True, text=True, timeout=2
+                    cmd, cwd=tmpdir, capture_output=True, text=True, timeout=2
                 )
         except subprocess.TimeoutExpired:
             return []
