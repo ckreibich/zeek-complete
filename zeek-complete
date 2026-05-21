@@ -1,7 +1,8 @@
 #! /usr/bin/env python3
-"""A command-line argument completer for use with Bash completion. See the
-accompanying "zeek" shell script, and install it in any of your system's
-bash_completion.d directories."""
+"""A command-line argument completer for use with Bash-like completion via
+"complete". See the accompanying "zeek" shell script, and install it in one of
+your system's bash_completion.d directories.
+"""
 
 # For easier forward references in type annotations -- not needed in 3.14+
 from __future__ import annotations
@@ -30,8 +31,8 @@ class CompType(enum.Enum):
     # as well -- see the Bash manpage for details. "Normal" and "successive"
     # completions come up regularly. I haven't figuredo out the others.
     UNKNOWN = 0
-    NORMAL = 9  # tab
-    SUCCESSIVE = 63  # ? (tab tab)
+    NORMAL = 9  # tab -- will complete if there's only a single possibility
+    SUCCESSIVE = 63  # ? (tab tab) -- will list possible completions
     PARTIAL_WORD = 33  # !
     MODDED_WORD = 64  # @
     MENU = 37  # %
@@ -223,18 +224,16 @@ class ZeekArgs:
 
             # Go from e.g "--pseudo-realtime[=<speedup>]" to
             # "--pseudo-realtime=speedup", to be broken apart below.
-            longarg = (
-                longarg.replace("[", "")
-                .replace("]", "")
-                .replace("<", "")
-                .replace(">", "")
-            )
+            for char in "[]<>":
+                longarg = longarg.replace(char, "")
+
             # Some long forms use a space separator in the help output, others an equals sign:
             longparts = [p.strip() for p in re.split(r"[ =]", longarg)]
 
             if len(longparts) > 1:
                 param = longparts[1]  # Things like "file", "level", or "interface"
 
+            # We now have everything for a ZeekArg, register it:
             self.args[longparts[0]] = ZeekArg(
                 longparts[0], shortarg, param, param_optional
             )
@@ -265,8 +264,8 @@ class ZeekArgs:
         self, lctx: LineContext
     ) -> tuple[argparse.Namespace, list[str]] | tuple[None, None]:
         """Parse the given line context via argparse into arguments and any
-        scripts/redefs provided. Returns these as a tuple, or None/None in case
-        of error.
+        added Zeek scripts/redefs provided. Returns these as a tuple, or
+        None/None in case of error.
         """
         try:
             # Tricky: we want to process lctx.line_words, i.e. the command
