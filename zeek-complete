@@ -596,7 +596,7 @@ event zeek_init() &priority=10000 {
         for glbl in res.stdout.splitlines():
             try:
                 name, typ = glbl.strip().split(maxsplit=1)
-                if name.lower().startswith(prefix.lower()):
+                if name.startswith(prefix):
                     # Experimental: include type info in tab-tab output,
                     # not otherwise. This might get in the way?
                     if self.lctx.comp_type == CompType.SUCCESSIVE:
