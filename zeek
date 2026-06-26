@@ -34,7 +34,11 @@ _zeek_complete()
     _comp_ltrim_colon_completions "$cur"
 }
 
-# Without the above workarounds you can invoke zeek-complete e.g. like this:
-# zeek-complete 2>/dev/null && complete -o default -o nospace -C zeek-complete zeek
-
-zeek-complete 2>/dev/null && complete -o nospace -F _zeek_complete zeek
+if zeek-complete 2>/dev/null; then
+    # Use the above workarounds only when available.
+    if declare -F "_comp_ltrim_colon_completions" > /dev/null; then
+        complete -o nospace -F _zeek_complete zeek
+    else
+        complete -o default -o nospace -C zeek-complete zeek
+    fi
+fi
