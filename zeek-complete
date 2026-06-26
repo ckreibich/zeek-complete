@@ -439,7 +439,7 @@ class FileTree:
         for path in islice(glob.glob(self.expand_prefix(prefix) + "*"), self.limit):
             p = pathlib.Path(path)
             if p.is_dir():
-                # If it's a directory, we end with the slash and no space. That
+                # If it's a directory, we end with the separator. That
                 # makes it more natural to continue to expand.
                 res.append(f"{path}{os.sep}")
                 continue
@@ -498,10 +498,7 @@ class FileCompleter(Completer):
     any kind of file."""
 
     def match(self, prefix: str) -> list[str]:
-        res: list[str] = FileTree().match(prefix)
-        if res:
-            return res
-        return []
+        return FileTree().match(prefix)
 
 
 class ScriptCompleter(Completer):
@@ -509,10 +506,7 @@ class ScriptCompleter(Completer):
     Zeek scripts."""
 
     def match(self, prefix: str) -> list[str]:
-        res: list[str] = FileTree(zeek_only=True).match(prefix)
-        if res:
-            return res
-        return []
+        return FileTree(zeek_only=True).match(prefix)
 
 
 class ZeekpathScriptCompleter(Completer):
@@ -635,15 +629,12 @@ def prefix_filter(
     ]
 
 
-def print_list(lst: list[Any], suffix: str = " ") -> bool:
+def print_list(lst: list[Any]) -> bool:
     """Given a nonempty list of items, prints each and returns True; otherwise,
-    returns False. The suffix is included on each item and meant to control what
-    happens at the end of a completion: for a command line option you usually
-    want automatic space separation, while for paths you don't.
-    """
+    returns False."""
     if lst:
         for item in lst:
-            print(str(item) + suffix)
+            print(str(item))
         return True
     return False
 
@@ -671,7 +662,7 @@ def main() -> int:
     ):
         lsc = ScriptCompleter()
         scripts = lsc.match(ctx.curr_word)
-        if print_list(scripts, suffix=""):
+        if print_list(scripts):
             return 0
 
     # With the start of a command-line argument, apply argument completion:
@@ -704,7 +695,7 @@ def main() -> int:
             return 1
         zscomp = ZeekpathScriptCompleter(zargs.zeekpath)
         scripts = zscomp.match(ctx.curr_word)
-        if print_list(scripts, suffix=""):
+        if print_list(scripts):
             return 0
 
     # And at last, try redefing globals.
@@ -713,7 +704,7 @@ def main() -> int:
             return 1
         zgcomp = ZeekGlobalsCompleter(zargs, ctx, redefables_only=True)
         glbls = zgcomp.match(ctx.curr_word)
-        if print_list(glbls, suffix=""):
+        if print_list(glbls):
             return 0
 
     return 0
