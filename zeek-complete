@@ -592,11 +592,12 @@ event zeek_init() &priority=10000 {
                 name, typ = glbl.strip().split(maxsplit=1)
                 if name.startswith(prefix):
                     # Experimental: include type info in tab-tab output,
-                    # not otherwise. This might get in the way?
+                    # ie. when listing multiple potential matches. Not
+                    # sure whether to keep this, might be confusing.
                     if self.lctx.comp_type == CompType.SUCCESSIVE:
                         globals.append(f"{name}=<{typ}>")
                     else:
-                        globals.append(name)
+                        globals.append(name + "=")
             except ValueError:
                 continue
 
