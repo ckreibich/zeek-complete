@@ -176,7 +176,11 @@ class ZeekArgs:
 
         try:
             res = subprocess.run(
-                (self.cmd, "--help"), capture_output=True, text=True, timeout=1
+                (self.cmd, "--help"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=1,
             )
         except subprocess.TimeoutExpired:
             return False
@@ -377,8 +381,15 @@ class ZeekArgs:
     def _get_zeek_debugstreams(self) -> list[str]:
         """Returns list of the possible options to -B|--debug."""
         try:
+            # The debug stream help output should always be on stderr,
+            # but use redirection anyway in case we change this to align
+            # with --help & -O help.
             res = subprocess.run(
-                (self.cmd, "-B", "help"), capture_output=True, text=True, timeout=1
+                (self.cmd, "-B", "help"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=1,
             )
         except subprocess.TimeoutExpired:
             return []
@@ -403,7 +414,11 @@ class ZeekArgs:
         """Returns list of the possible options to -O|--optimize."""
         try:
             res = subprocess.run(
-                (self.cmd, "-O", "help"), capture_output=True, text=True, timeout=1
+                (self.cmd, "-O", "help"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=1,
             )
         except subprocess.TimeoutExpired:
             return []
