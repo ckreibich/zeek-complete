@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import enum
 import glob
+import json
 import os
 import pathlib
 import re
@@ -543,11 +544,18 @@ class ZeekpathScriptCompleter(Completer):
 
 
 class ZeekGlobalsCompleter(Completer):
+    # Print JSONL output for Zeek's globals, including the name of the global,
+    # its type, and (for scalar types) the current value in Zeek's native format.
     SCRIPT = """
 event zeek_init() &priority=10000 {
+    local atomics = set("addr","bool","count","double","int","interval","time","port","string","subnet","time");
     for ( n, id in global_ids() )
-        if ( @CONDITIONS@ )
-            print fmt("%s %s", n, id$type_name);
+        if ( @CONDITIONS@ ) {
+            local t = table(["name"]=n, ["type"]=id$type_name);
+            if (id$type_name in atomics)
+                t["value"] = cat(id$value);
+            print to_json(t);
+        }
     exit(0);
 }
 """
@@ -602,18 +610,34 @@ event zeek_init() &priority=10000 {
 
         globals: list[str] = []
 
-        for glbl in res.stdout.splitlines():
+        for json_global in res.stdout.splitlines():
             try:
-                name, typ = glbl.strip().split(maxsplit=1)
+                tbl = json.loads(json_global)
+                name, typ = tbl["name"], tbl["type"]
+                value = tbl["value"] if "value" in tbl else ""
+
+                # If it's a string, put quotes around it for better legibility
+                if typ == "string":
+                    value = '"' + value + '"'
+
+                # Could also glob, for more flexibility
                 if name.startswith(prefix):
-                    # Experimental: include type info in tab-tab output,
-                    # ie. when listing multiple potential matches. Not
-                    # sure whether to keep this, might be confusing.
+                    # Experimental: include type info when listing multiple
+                    # matches. Not sure about this, might be confusing.
                     if self.lctx.comp_type == CompType.SUCCESSIVE:
-                        globals.append(f"{name}=<{typ}>")
+                        if "value" in tbl:
+                            globals.append(f"{name}=<{typ}: {value}>")
+                        else:
+                            globals.append(f"{name}=<{typ}>")
                     else:
-                        globals.append(name + "=")
+                        globals.append(f"{name}={value}")
             except ValueError:
+                if os.getenv("ZEEK_COMPLETE_EXCEPTIONS", ""):
+                    print(
+                        "\n*** zeek-complete failed unexpectedly when parsing Zeek's globals:",
+                        file=sys.stderr,
+                    )
+                    traceback.print_exc(file=sys.stderr)
                 continue
 
         return globals
