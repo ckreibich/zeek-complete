@@ -614,14 +614,23 @@ event zeek_init() &priority=10000 {
             try:
                 tbl = json.loads(json_global)
                 name, typ = tbl["name"], tbl["type"]
+
+                # Could also glob, for more flexibility
+                if not name.startswith(prefix):
+                    continue
+
                 value = tbl["value"] if "value" in tbl else ""
 
                 # If it's a string, put quotes around it for better legibility
                 if typ == "string":
                     value = '"' + value + '"'
 
-                # Could also glob, for more flexibility
-                if name.startswith(prefix):
+                # How we render these depends on the context. For the redefables
+                # case, we add type and value context, since the goal is a
+                # redefinition on the command line. For the others we give type
+                # info in tab-tab completion, and just the value otherwise
+                # (e.g. for --optimize-funcs).
+                if self.redefables_only:
                     # Experimental: include type info when listing multiple
                     # matches. Not sure about this, might be confusing.
                     if self.lctx.comp_type == CompType.SUCCESSIVE:
@@ -631,6 +640,13 @@ event zeek_init() &priority=10000 {
                             globals.append(f"{name}=<{typ}>")
                     else:
                         globals.append(f"{name}={value}")
+                    continue
+
+                if self.lctx.comp_type == CompType.SUCCESSIVE:
+                    globals.append(f"{name}=<{typ}>")
+                else:
+                    globals.append(name)
+
             except ValueError:
                 if os.getenv("ZEEK_COMPLETE_EXCEPTIONS", ""):
                     print(
