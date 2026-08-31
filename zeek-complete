@@ -328,9 +328,11 @@ class ZeekArgs:
                 return match
         return None
 
-    def find_arg_param(self, lctx: LineContext) -> list[str]:
+    def find_arg_param(self, lctx: LineContext) -> list[str] | None:
         """Returns possible parameters to a given argument, such as network
-        interfaces for "-i".
+        interfaces for "-i". This list may be empty if no suitable parameters
+        are available. Returns None if it doesn't look like the line currently
+        needs a parameter for an argument.
         """
         arg = lctx.prev_word
         prefix = lctx.curr_word
@@ -372,7 +374,7 @@ class ZeekArgs:
                 zgcomp = ZeekGlobalsCompleter(self, lctx, funcs_only=True)
                 return zgcomp.match(prefix)
 
-        return []
+        return None
 
     def _get_sys_interfaces(self) -> list[str]:
         """Returns list of network interfaces on this machine.
@@ -751,7 +753,12 @@ def main() -> int:
         if not zargs.parse_help():
             return 1
         params = zargs.find_arg_param(ctx)
-        if print_list(params):
+        if params is not None:
+            # We got a list that may or may not be empty. Either way we do not
+            # fall through to other completions because we know that we should
+            # have gotten a particular completion. Other types of completions
+            # do not make sense in this context.
+            print_list(params)
             return 0
 
     # If it looks file-like, try script path completion based on ZEEKPATH:
