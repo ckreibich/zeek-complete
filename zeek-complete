@@ -309,9 +309,19 @@ class ZeekArgs:
 
     def find(self, arg: str) -> MatchedArg | None:
         """Returns a potential matching argument based on exact match of the
-        given argument name against short or long versions. Returns None
-        if no such argument exists.
+        given argument name against short or long versions.
+
+        There's a wrinkle: When multiple single-char arguments get run into one
+        ("-Cr"), we only care about the last one. We'd ideally rely on
+        argparser, but that parse (in self._parse_line()) needs this this method
+        to accommodate corner-cases so we can't use it yet.
+
+        Returns None if no such argument exists.
         """
+        # Turn e.g. "-Cr" into "-r" for matching purposes:
+        if arg.startswith("-") and not arg.startswith("--") and len(arg) > 1:
+            arg = "-" + arg[-1]
+
         for zarg in self.args.values():
             match: MatchedArg | None = zarg.equal(arg)
             if match is not None:
