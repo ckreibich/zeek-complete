@@ -722,21 +722,8 @@ def main() -> int:
     ctx = LineContext(cmd, curr_word, prev_word)
     zargs = ZeekArgs(ctx.cmd)
 
-    # First, try simple path-based script completion. For this we need to
-    # parsing of Zeek output. This is similar to standard shell expansion, but
-    # doing this ourselves allows os to control ordering relative to other
-    # completion strategies.
-    if (
-        ctx.curr_word
-        and not ctx.curr_word.startswith("-")
-        and not ctx.curr_word.endswith("=")
-    ):
-        lsc = ScriptCompleter()
-        scripts = lsc.match(ctx.curr_word)
-        if print_list(scripts):
-            return 0
-
-    # With the start of a command-line argument, apply argument completion:
+    # Apply argument completion if we're currently at the start of a
+    # command-line argument:
     if ctx.curr_word.startswith("-"):
         if not zargs.parse_help():
             return 1
@@ -761,16 +748,22 @@ def main() -> int:
             print_list(params)
             return 0
 
-    # If it looks file-like, try script path completion based on ZEEKPATH:
+    # If it looks file-like, try script path completion.
     if (
         ctx.curr_word
         and not ctx.curr_word.startswith("-")
         and not ctx.curr_word.endswith("=")
     ):
-        if not zargs.parse_help():
-            return 1
-        zscomp = ZeekpathScriptCompleter(zargs.zeekpath)
-        scripts = zscomp.match(ctx.curr_word)
+        # First try local expansion and fall back to a ZEEKPATH-powered one if
+        # the former yields nothing. This helps avoid related results that can
+        # come up if ZEEKPATH inludes "." (such as "foo" and "./foo").
+        lcomp = ScriptCompleter()
+        scripts = lcomp.match(ctx.curr_word)
+        if not scripts:
+            if not zargs.parse_help():
+                return 1
+            zscomp = ZeekpathScriptCompleter(zargs.zeekpath)
+            scripts = zscomp.match(ctx.curr_word)
         if print_list(scripts):
             return 0
 
