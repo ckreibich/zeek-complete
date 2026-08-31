@@ -770,6 +770,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # An off-switch, in case people encounter completion problems.
+    if os.getenv("ZEEK_COMPLETE_DISABLE", ""):
+        sys.exit(0)
     try:
         sys.exit(main())
     except Exception:
