@@ -149,7 +149,7 @@ class ZeekArgs:
 
     def __init__(self, cmd: str):
         self.cmd: str = cmd
-        self.args: dict[str, ZeekArg] = {}  # indexed by long-form arg
+        self.args: dict[str, ZeekArg] = {}  # indexed by long-form arg, with "--"
 
         # A parser for the command line so we can easily parse the existing
         # line. Zeek supports things like "-C -r ..." being the same as "-Cr",
@@ -489,7 +489,7 @@ class ZeekpathScriptTree(FileTree):
             for p in islice(
                 self.path.glob(self.expand_prefix(prefix) + "*"), self.limit
             ):
-                # The path relative to the root of the tree. This ensures we get
+                # Make path relative to the root of the tree. This ensures we get
                 # paths starting from the entries of ZEEKPATH, not absolute paths.
                 rpath = p.relative_to(self.path)
                 # As in the base class:
@@ -544,6 +544,9 @@ class ZeekpathScriptCompleter(Completer):
 
 
 class ZeekGlobalsCompleter(Completer):
+    """A completer for global identifiers in Zeek. Uses an invocation of Zeek to
+    obtain such lists with various filtering criteria."""
+
     # Print JSONL output for Zeek's globals, including the name of the global,
     # its type, and (for scalar types) the current value in Zeek's native format.
     SCRIPT = """
