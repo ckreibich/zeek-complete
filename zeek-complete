@@ -11,6 +11,7 @@ import argparse
 import enum
 import glob
 import json
+import logging
 import os
 import pathlib
 import re
@@ -22,6 +23,57 @@ import traceback
 
 from itertools import islice
 from typing import Any
+
+
+class MultilineFormatter(logging.Formatter):
+    """A formatter that can handle newlines in its message, breaking them into
+    multiple indented lines."""
+
+    def __init__(self) -> None:
+        super().__init__("%(levelname)s: %(message)s")
+        # We precede the first write in the completion run with an extra newline,
+        # to break away from the mid-line completion.
+        self.first_write = True
+
+    def format(self, rec: logging.LogRecord) -> str:
+        message = super().format(rec)
+        lines = message.split("\n")
+        if len(lines) > 1:
+            message = (
+                lines[0]
+                + "\n"
+                + "\n".join(f"{rec.levelname}:     " + line for line in lines[1:])
+            )
+
+        initial_newline = "\n" if self.first_write else ""
+        self.first_write = False
+        return initial_newline + message
+
+
+class Logger:
+    """Our own logger, focused on lazy initialization. We don't care about log
+    levels, just an optional mechanism for writing debug output to stderr."""
+
+    def __init__(self) -> None:
+        self.logger: None | logging.Logger = None
+
+    def enable(self) -> None:
+        if self.logger is not None:
+            return
+
+        handler = logging.StreamHandler(sys.stderr)
+        formatter = MultilineFormatter()
+        handler.setFormatter(formatter)
+        self.logger = logging.getLogger("zeek-complete")
+        self.logger.addHandler(handler)
+        self.logger.setLevel(logging.DEBUG)
+
+    def write(self, *msgs: str) -> None:
+        if self.logger is not None:
+            self.logger.debug("\n".join([msg.strip() for msg in msgs]))
+
+
+LOG = Logger()
 
 
 class CompType(enum.Enum):
@@ -46,11 +98,10 @@ class LineContext:
     previous word are passed as arguments if we're invoked via "complete -C".
     Such invocation also provides COMP_* environment variables for the whole
     line, the point offset, and the completion type, so we grab these as
-    available as well.
-    """
+    available as well."""
 
-    def __init__(self, cmd: str, curr_word: str, prev_word: str):
-        self.cmd = cmd
+    def __init__(self, cmd: str, curr_word: str, prev_word: str) -> None:
+        self.cmd = cmd  # Normally "zeek"
         self.curr_word = curr_word
         self.prev_word = prev_word
 
@@ -83,7 +134,7 @@ class ZeekArg:
         shortarg: str = "",
         param: str = "",
         param_optional: bool = False,
-    ):
+    ) -> None:
         self.longarg = longarg  # The long-form arg, e.g. "--foo"
         self.shortarg = shortarg  # The short-form arg, e.g. "-f"
         self.param = param  # The param, e.g. "interface"
@@ -131,7 +182,7 @@ class MatchedArg:
     """An argument selected via a prefix match, either on the short or the long
     version of the argument."""
 
-    def __init__(self, arg: ZeekArg, is_short: bool):
+    def __init__(self, arg: ZeekArg, is_short: bool) -> None:
         self.arg = arg
         self.is_short = is_short
 
@@ -147,7 +198,7 @@ class ZeekArgs:
     the output.
     """
 
-    def __init__(self, cmd: str):
+    def __init__(self, cmd: str) -> None:
         self.cmd: str = cmd
         self.args: dict[str, ZeekArg] = {}  # indexed by long-form arg, with "--"
 
@@ -187,6 +238,7 @@ class ZeekArgs:
             return False
 
         if res.returncode != 0:
+            LOG.write("Zeek help invocation failed:", res.stderr.strip())
             return False
 
         lines = [line.lstrip() for line in res.stdout.splitlines()]
@@ -458,7 +510,7 @@ class FileTree:
     # If you want .bro, you're old enough to be used to typing a lot. ;-)
     ZEEK_SUFFIXES = [".zeek", ".js"]
 
-    def __init__(self, zeek_only: bool = False, limit: int = 1000):
+    def __init__(self, zeek_only: bool = False, limit: int = 1000) -> None:
         self.zeek_only = zeek_only
         self.limit = limit
 
@@ -486,7 +538,7 @@ class FileTree:
 class ZeekpathScriptTree(FileTree):
     """A specialization that completes relative to a given (ZEEKPATH) directory."""
 
-    def __init__(self, path: str, limit: int = 1000):
+    def __init__(self, path: str, limit: int = 1000) -> None:
         """Constructor. The path argument is the directory at which we root the
         tree, and limit is the maximum number of files to yield.
         """
@@ -541,7 +593,7 @@ class ZeekpathScriptCompleter(Completer):
     """This attempts path expansion for Zeek scripts, based on the directories
     in ZEEPATH as well as the local directory."""
 
-    def __init__(self, zeekpath: str):
+    def __init__(self, zeekpath: str) -> None:
         self.zeekpath = zeekpath
         self.roots = [ZeekpathScriptTree(path) for path in zeekpath.split(os.pathsep)]
 
@@ -581,7 +633,7 @@ event zeek_init() &priority=10000 {
         lctx: LineContext,
         redefables_only: bool = False,
         funcs_only: bool = False,
-    ):
+    ) -> None:
         self.args = args
         self.lctx = lctx
         self.redefables_only = redefables_only
@@ -621,6 +673,10 @@ event zeek_init() &priority=10000 {
             return []
 
         if res.returncode != 0:
+            # This will happen any time the current command line includes
+            # something that fails Zeek, like a non-existant policy script,
+            # invalid option, etc.
+            LOG.write("Zeek globals invocation failed:", res.stderr.strip())
             return []
 
         globals: list[str] = []
@@ -722,14 +778,20 @@ def main() -> int:
     ctx = LineContext(cmd, curr_word, prev_word)
     zargs = ZeekArgs(ctx.cmd)
 
+    LOG.write(
+        f"context: cmd '{ctx.cmd}', cur '{ctx.curr_word}', prev '{ctx.prev_word}'"
+    )
+
     # Apply argument completion if we're currently at the start of a
     # command-line argument:
     if ctx.curr_word.startswith("-"):
+        LOG.write("attempting argument completion")
         if not zargs.parse_help():
             return 1
         matches = zargs.find_by_match(ctx.curr_word)
         if print_list(matches):
             return 0
+        LOG.write("no argument completion resulted")
 
     # Next, if the previous word is an argument, and the current isn't, this
     # might be a parameter to the argument, such as a network interface to -i,
@@ -737,6 +799,7 @@ def main() -> int:
     if ctx.prev_word.startswith("-") and (
         not ctx.curr_word or not ctx.curr_word.startswith("-")
     ):
+        LOG.write("attempting argument option completion")
         if not zargs.parse_help():
             return 1
         params = zargs.find_arg_param(ctx)
@@ -747,6 +810,7 @@ def main() -> int:
             # do not make sense in this context.
             print_list(params)
             return 0
+        LOG.write("no argument option resulted")
 
     # If it looks file-like, try script path completion.
     if (
@@ -754,6 +818,7 @@ def main() -> int:
         and not ctx.curr_word.startswith("-")
         and not ctx.curr_word.endswith("=")
     ):
+        LOG.write("attempting script completion")
         # First try local expansion and fall back to a ZEEKPATH-powered one if
         # the former yields nothing. This helps avoid related results that can
         # come up if ZEEKPATH inludes "." (such as "foo" and "./foo").
@@ -762,19 +827,23 @@ def main() -> int:
         if not scripts:
             if not zargs.parse_help():
                 return 1
+            LOG.write("no local script completion resulted")
             zscomp = ZeekpathScriptCompleter(zargs.zeekpath)
             scripts = zscomp.match(ctx.curr_word)
         if print_list(scripts):
             return 0
+        LOG.write("no script completion resulted")
 
     # And at last, try redefing globals.
     if ctx.curr_word:
+        LOG.write("attempting globals completion")
         if not zargs.parse_help():
             return 1
         zgcomp = ZeekGlobalsCompleter(zargs, ctx, redefables_only=True)
         glbls = zgcomp.match(ctx.curr_word)
         if print_list(glbls):
             return 0
+        LOG.write("no globals script completion resulted")
 
     return 0
 
@@ -783,12 +852,21 @@ if __name__ == "__main__":
     # An off-switch, in case people encounter completion problems.
     if os.getenv("ZEEK_COMPLETE_DISABLE", ""):
         sys.exit(0)
+
+    # Similarly, enable debug logging to stderr when desired:
+    if os.getenv("ZEEK_COMPLETE_DEBUG", ""):
+        LOG.enable()
+
     try:
         sys.exit(main())
     except Exception:
-        # Sweep this under the rug unless the user has asked to see backtraces.
-        if os.getenv("ZEEK_COMPLETE_EXCEPTIONS", ""):
-            print("\n*** zeek-complete failed unexpectedly:", file=sys.stderr)
+        # Sweep this under the rug unless the user has asked to see backtraces,
+        # or we're running with verbose output.
+        if os.getenv("ZEEK_COMPLETE_EXCEPTIONS", "") or os.getenv(
+            "ZEEK_COMPLETE_DEBUG", ""
+        ):
+            LOG.enable()
+            LOG.write("zeek-complete failed unexpectedly:")
             traceback.print_exc(file=sys.stderr)
     except KeyboardInterrupt:
         # Just error out if the user ctrl-c's while we run things.
