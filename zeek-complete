@@ -623,7 +623,7 @@ event zeek_init() &priority=10000 {
                 t["value"] = cat(id$value);
             print to_json(t);
         }
-    exit(0);
+    terminate();
 }
 """
 
